@@ -1,12 +1,41 @@
+/**
+ * @file sysreo.proto
+ * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
+ * @brief Definition of sysrepo GPB messages used as the API for the
+ * communication between sysrepo engine and sysrepo client library.
+ *
+ * @copyright
+ * Copyright 2016 Cisco Systems, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 syntax="proto2";
 package sr;
 
+/**
+ * @brief Datastore on which the configuration session will operate.
+ */
 enum DataStore {
   RUNNING = 1;
   CANDIDATE = 2;
   STARTUP = 3;
 }
 
+/**
+ * @brief Value of an item stored (or to be stored) in the datastore.
+ * Can be mapped to sr_val_t data structure from sysrepo library API.
+ */
 message Value {
   enum Types {
     LIST = 1;
@@ -14,9 +43,23 @@ message Value {
     CONTAINER_PRESENCE = 3;
     LEAF_EMPTY = 4;
 
-    BOOL = 11;
-    UINT32 = 12;
-    STRING = 13;
+    BINARY = 10;
+    BITS = 11;
+    BOOL = 12;
+    DECIMAL64 = 13;
+    ENUM = 14;
+    IDENTITYREF = 15;
+    INSTANCEID = 16;
+    INT8 = 17;
+    INT16 = 18;
+    INT32 = 19;
+    INT64 = 20;
+    LEAFREF = 21;
+    STRING = 22;
+    UINT8 = 23;
+    UINT16 = 24;
+    UINT32 = 25;
+    UINT64 = 26;
   }
 
   required string path = 1;
@@ -24,67 +67,149 @@ message Value {
   
   optional uint32 length = 3;
 
-  optional bool bool_val = 10;
-  optional uint32 uint32_val = 11;
-  optional string string_val = 12;
+  optional string binary_val = 10;
+  optional string bits_val = 11;
+  optional bool bool_val = 12;
+  optional uint64 decimal64_val = 13;
+  optional string enum_val = 14;
+  optional string identityref_val = 15;
+  optional string instanceid_val = 16;
+  optional int32 int8_val = 17;
+  optional int32 int16_val = 18;
+  optional int32 int32_val = 19;
+  optional int64 int64_val = 20;
+  optional string leafref_val = 21;
+  optional string string_val = 22;
+  optional uint32 uint8_val = 23;
+  optional uint32 uint16_val = 24;
+  optional uint32 uint32_val = 25;
+  optional uint64 uint64_val = 26;
 }
 
+/**
+ * @brief Information about a schema installed in sysrepo datastore.
+ */
+message Schema {
+  required string module_name = 1;  /**< Name of the module. */
+  required string ns = 2;           /**< Namespace of the module. */
+  required string prefix = 3;       /**< Prefix of he module. */
+  optional string revision = 4;     /**< Latest revision date of the module. */
+  required string file_path = 5;    /**< Absolute path to file where the schema is stored. */
+}
+
+/**
+ * @brief Request for starting a session. Sent by sr_session_start API call.
+ */
 message SessionStartReq {
   required string user_name = 1;
+  required DataStore datastore = 2;
 }
 
+/**
+ * @brief Response to session_start request.
+ */
 message SessionStartResp {
   required uint32 session_id = 1;
 }
 
+/**
+ * @brief Request for stopping the session. Sent by sr_session_stop API call.
+ */
 message SessionStopReq {
   required uint32 session_id = 1;
 }
 
+/**
+ * @brief Response to session_stop request.
+ */
 message SessionStopResp {
   required uint32 session_id = 1;
 }
 
+/**
+ * @brief Retrieves a single data element stored under provided path.
+ * Sent by sr_get_item API call.
+ */
 message GetItemReq {
-  required DataStore datastore = 1;
-  required string path = 2;
+  required string path = 1;
 }
 
+/**
+ * @brief Response to get_item request.
+ */
 message GetItemResp {
   optional Value value = 1;
 }
 
+/**
+ * @brief Retrieves an array of data elements stored under provided path.
+ * Sent by sr_get_items and sr_get_items_iter API calls.
+ */
 message GetItemsReq {
-  required DataStore datastore = 1;
-  required string path = 2;
+  required string path = 1;
 
-  optional bool recursive = 3;
-  optional uint32 limit = 4;
-  optional uint32 offset = 5;
+  /*
+   * The options below are applicable only for sr_get_items_iter
+   * (not set by sr_get_items).
+   */
+  optional bool recursive = 2;
+  optional uint32 limit = 3;
+  optional uint32 offset = 4;
 }
 
+/**
+ * @brief Response to get_items / sr_get_items_iter request.
+ */
 message GetItemsResp {
-  repeated Value value = 1;
+  repeated Value values = 1;
 }
 
+/**
+ * @brief Retrieves an array of schemas installed in the sysrepo datastore.
+ * Sent by sr_list_schemas API call.
+ */
+message ListSchemasReq {
+  /* does not hold any information */
+}
+
+/**
+ * @brief Response to sr_list_schemas request.
+ */
+message ListSchemasResp {
+  repeated Schema schemas = 1;
+}
+
+/**
+ * @brief Requested operation.
+ */
 enum Operation {
   SESSION_START = 1;
   SESSION_STOP = 2;
 
-  GET_ITEM = 3;
-  GET_ITEMS = 4;
+  LIST_SCHEMAS = 3;
+
+  GET_ITEM = 4;
+  GET_ITEMS = 5;
 }
 
+/**
+ * @brief Request for an operation.
+ */
 message Req {
   required Operation operation = 1;
 
   optional SessionStartReq session_start_req = 10;
   optional SessionStopReq session_stop_req = 11;
   
-  optional GetItemReq get_item_req = 12;
-  optional GetItemsReq get_items_req = 13;
+  optional ListSchemasReq list_schemas_req = 12;
+
+  optional GetItemReq get_item_req = 13;
+  optional GetItemsReq get_items_req = 14;
 }
 
+/**
+ * @brief Response to the received request.
+ */
 message Resp {
   required Operation operation = 1;
   required uint32 result = 2;
@@ -93,18 +218,27 @@ message Resp {
   optional SessionStartResp session_start_resp = 10;
   optional SessionStopResp session_stop_resp = 11;
   
-  optional GetItemResp get_item_resp = 12;
-  optional GetItemsResp get_items_resp = 13;
+  optional ListSchemasResp list_schemas_resp = 12;
+
+  optional GetItemResp get_item_resp = 13;
+  optional GetItemsResp get_items_resp = 14;
 }
 
+/**
+ * @brief Umbrella sysrepo message used for communication between sysrepo
+ * engine and client library.
+ */
 message Msg {
+  /**
+   * @brief Type of the message.
+   */
   enum MsgType {
-    REQUEST = 1;
-    RESPONSE = 2;
+    REQUEST = 1;   /**< The message is a request. */
+    RESPONSE = 2;  /**< The message is a response to the request. */
   }
 
-  required MsgType type = 1;
-  required uint32 session_id = 2;
-  optional Req request = 3;
-  optional Resp response = 4;
+  required MsgType type = 1;       /**< Indicates type of the message. */
+  required uint32 session_id = 2;  /**< Session identifier. Can be 0 (value is ignored) for session_start request. */
+  optional Req request = 3;        /**< Filled in in case of type == REQUEST. */
+  optional Resp response = 4;      /**< Filled in in case of type == RESPONSE. */
 }

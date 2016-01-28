@@ -18,6 +18,7 @@ add_custom_command(
 
 add_custom_target(proto DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_NAME}.pb-c.c)
 
+configure_file("${PROJECT_SOURCE_DIR}/src/dm_location.h.in" "${PROJECT_SOURCE_DIR}/src/dm_location.h" ESCAPE_QUOTES @ONLY)
 
 #setup library sources
 set(SYSREPO-SOURCES
@@ -33,6 +34,7 @@ set(SYSREPO-ENGINE-SOURCES
     session_manager.c
     request_processor.c
     rp_data_tree.c
+    rp_node_stack.c
     data_manager.c
     xpath_processor.c
     sr_common.c
@@ -52,10 +54,10 @@ add_library(sysrepo-engine_so SHARED ${SYSREPO-ENGINE-SOURCES})
 SET_TARGET_PROPERTIES(sysrepo-engine_so PROPERTIES
               OUTPUT_NAME sysrepo-engine CLEAN_DIRECT_OUTPUT 1)
 
-set(LINK_LIBRARIES avl protobuf-c pthread yang)
+set(LINK_LIBRARIES avl ev pthread protobuf-c yang)
 
-target_link_libraries(sysrepo ${LINK_LIBRARIES})
-target_link_libraries(sysrepo_so ${LINK_LIBRARIES})
+target_link_libraries(sysrepo ${LINK_LIBRARIES} sysrepo-engine)
+target_link_libraries(sysrepo_so ${LINK_LIBRARIES} sysrepo-engine_so)
 target_link_libraries(sysrepo-engine ${LINK_LIBRARIES})
 target_link_libraries(sysrepo-engine_so ${LINK_LIBRARIES})
 

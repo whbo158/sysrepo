@@ -26,13 +26,15 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+typedef struct cm_session_ctx_s cm_session_ctx_t;        /**< Forward-declaration of Connection Manager's session context. */
+typedef struct cm_connection_ctx_s cm_connection_ctx_t;  /**< Forward-declaration of Connection Manager's connection context. */
+
 /**
  * @defgroup sm Session Manager
  * @{
  *
  * @brief Session manager tracks information about all active sysrepo sessions
- * (see ::sm_session_t), including connection-related information
- * (see ::sm_connection_t).
+ * (see ::sm_session_t), and connections (see ::sm_connection_t).
  *
  * Sessions and connections are tied together, one connection can be used
  * to serve multiple sessions.
@@ -49,6 +51,11 @@
 typedef struct sm_ctx_s sm_ctx_t;
 
 /**
+ * @brief Callback called by session / connection cleanup used to cleanup CM-related data.
+ */
+typedef void (*sm_cleanup_cb)(void *ctx);
+
+/**
  * @brief Session context structure, represents one particular session.
  */
 typedef struct sm_session_s {
@@ -58,7 +65,8 @@ typedef struct sm_session_s {
     const char *real_user;               /**< Real user name of the other side. */
     const char *effective_user;          /**< Effective user name of the other side (if different to real_user). */
 
-    void *rp_data;                       /**< Request Processor session data, opaque to Session Manager. */
+    sm_ctx_t *sm_ctx;                    /**< Associated Session Manager context. */
+    cm_session_ctx_t *cm_data;           /**< Connection Manager-related data. */
 } sm_session_t;
 
 /**
@@ -66,7 +74,7 @@ typedef struct sm_session_s {
  */
 typedef struct sm_session_list_s {
     sm_session_t *session;           /**< Session context. */
-    struct sm_session_list_s *next;  /**< Pointer to next session context. */
+    struct sm_session_list_s *next;  /**< Pointer to the next session context. */
 } sm_session_list_t;
 
 /**
@@ -76,15 +84,6 @@ typedef enum {
     CM_AF_UNIX_CLIENT,  /**< The other side is an unix-domain socket client. */
     CM_AF_UNIX_SERVER,  /**< The other side is an unix-domain socket server. */
 } sm_connection_type_t;
-
-/**
- * @brief Buffers of raw data received from / to be sent to the other side.
- */
-typedef struct sm_buffer_s {
-    uint8_t *data;  /**< data of the buffer */
-    size_t size;    /**< Current size of the buffer. */
-    size_t pos;     /**< Current position in the buffer */
-} sm_buffer_t;
 
 /**
  * @brief Connection context structure, represents one particular connection.
@@ -99,18 +98,20 @@ typedef struct sm_connection_s {
     gid_t gid;                        /**< Peer's effective group ID. */
     bool close_requested;             /**< Connection close requested. */
 
-    sm_buffer_t in_buff;   /**< Input buffer. If not empty, there is some received data to be processed. */
-    sm_buffer_t out_buff;  /**< Output buffer. If not empty, there is some data to be sent when receiver is ready. */
+    sm_ctx_t *sm_ctx;                 /**< Associated Session Manager context. */
+    cm_connection_ctx_t *cm_data;     /**< Connection Manager-related data. */
 } sm_connection_t;
 
 /**
  * @brief Initializes Session Manager.
  *
+ * @param[in] session_cleanup_cb Callback called by session cleanup (used to free CM-related data).
+ * @param[in] connection_cleanup_cb Callback called by connection cleanup (used to free CM-related data).
  * @param[out] sm_ctx Allocated Session Manager context that can be used in subsequent SM requests.
  *
  * @return Error code (SR_ERR_OK on success).
  */
-int sm_init(sm_ctx_t **sm_ctx);
+int sm_init(sm_cleanup_cb session_cleanup_cb, sm_cleanup_cb connection_cleanup_cb, sm_ctx_t **sm_ctx);
 
 /**
  * @brief Cleans up Session Manager.
@@ -214,6 +215,22 @@ int sm_session_find_id(const sm_ctx_t *sm_ctx, uint32_t session_id, sm_session_t
  * matching to fd cannot be found).
  */
 int sm_connection_find_fd(const sm_ctx_t *sm_ctx, const int fd, sm_connection_t **connection);
+
+/**
+ * @brief Returns session context at given index (position) in a list (starting
+ * from index 0, in increments of 1).
+ *
+ * It can be used to iterate over all sessions in the session manager, by
+ * incrementing the index starting from 0 until SR_ERR_NOT_FOUND is returned.
+ *
+ * @param[in] sm_ctx Session Manager context.
+ * @param[in] index Index of the session in the list, starting from 0.
+ * @param[out] session Session context stored at provided index in the list.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_NOT_FOUND if the session
+ * on provided index does not exist).
+ */
+int sm_session_get_index(const sm_ctx_t *sm_ctx, uint32_t index, sm_session_t **session);
 
 /**@} sm */
 

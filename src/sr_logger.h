@@ -50,22 +50,11 @@
 #define SR_LOGGING_ENABLED (1)           /**< Controls whether logging is enabled. */
 #define SR_LOG_PRINT_FUNCTION_NAMES (1)  /**< Controls whether function names should be printed. */
 
-/**
- * @brief Log levels used to determine if message of certain severity should be printed.
- */
-typedef enum {
-    SR_LL_NONE,  /**< Do not print any messages. */
-    SR_LL_ERR,   /**< Print only error messages. */
-    SR_LL_WRN,   /**< Print error and warning messages. */
-    SR_LL_INF,   /**< Besides errors and warnings, print some other informational messages. */
-    SR_LL_DBG    /**< Print all messages including some development debug messages. */
-} sr_log_level_t;
-
 extern volatile uint8_t sr_ll_stderr;  /**< Holds current level of stderr debugs. */
 extern volatile uint8_t sr_ll_syslog;  /**< Holds current level of syslog debugs. */
 
-#define SR_LOG_STDERR_DEFAULT_LL SR_LL_INF  /**< Default stderr log level. */
-#define SR_LOG_SYSLOG_DEFAULT_LL SR_LL_INF  /**< Default syslog log level. */
+#define SR_LOG_STDERR_DEFAULT_LL SR_LL_NONE  /**< Default stderr log level. */
+#define SR_LOG_SYSLOG_DEFAULT_LL SR_LL_INF   /**< Default syslog log level. */
 
 #define SR_LOG__LL_STR(LL) \
     ((SR_LL_DBG == LL) ? "DBG" : \
@@ -123,9 +112,13 @@ extern volatile uint8_t sr_ll_syslog;  /**< Holds current level of syslog debugs
 
 #else
 #define SR_LOG_ERR(...)
+#define SR_LOG_ERR_MSG(...)
 #define SR_LOG_WRN(...)
+#define SR_LOG_WRN_MSG(...)
 #define SR_LOG_INF(...)
+#define SR_LOG_INF_MSG(...)
 #define SR_LOG_DBG(...)
+#define SR_LOG_DBG_MSG(...)
 #endif
 
 /**
@@ -142,14 +135,6 @@ void sr_logger_init(const char *app_name);
  * @brief Cleans up Sysrepo logging subsystem.
  */
 void sr_logger_cleanup();
-
-/**
- * @brief Sets Logging Level of stderr logs and syslog logs.
- *
- * @param[in] ll_stderr Log level for stderr logs.
- * @param[in] ll_syslog Log level for syslog logs.
- */
-void sr_logger_set_level(sr_log_level_t ll_stderr, sr_log_level_t ll_syslog);
 
 /**@} logger */
 

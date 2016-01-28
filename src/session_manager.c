@@ -33,12 +33,14 @@
 
 #define SM_SESSION_ID_INVALID 0         /**< Invalid value of session id. */
 #define SM_SESSION_ID_MAX_ATTEMPTS 100  /**< Maximum number of attempts to generate unused random session id. */
-#define SM_FD_INVALID -1                /**< invalid value of file descriptor. */
+#define SM_FD_INVALID -1                /**< Invalid value of file descriptor. */
 
 /**
  * @brief Session Manager context.
  */
 typedef struct sm_ctx_s {
+    sm_cleanup_cb session_cleanup_cb;     /**< Callback called by session cleanup. */
+    sm_cleanup_cb connection_cleanup_cb;  /**< Callback called by connection cleanup. */
     avl_tree_t *session_id_avl;     /**< avl tree for fast session lookup by id. */
     avl_tree_t *connection_fd_avl;  /**< avl tree for fast connection lookup by file descriptor. */
 } sm_ctx_t;
@@ -87,7 +89,7 @@ sm_connection_cmp_fd(const void *a, const void *b)
 
 /**
  * @brief Cleans up the session. Releases all resources held in session context
- * by Session Manager.
+ * by Session Manager and Connection Manager (via provided callback).
  * @note Called automatically when a node from session_id avl tree is removed
  * (which is also when the tree itself is being destroyed).
  */
@@ -98,14 +100,17 @@ sm_session_cleanup(void *session)
         sm_session_t *sm_session = (sm_session_t *)session;
         free((void*)sm_session->real_user);
         free((void*)sm_session->effective_user);
+        /* cleanup Connection Manager-related data */
+        if ((NULL != sm_session->sm_ctx) && (NULL != sm_session->sm_ctx->session_cleanup_cb)) {
+            sm_session->sm_ctx->session_cleanup_cb(sm_session);
+        }
         free(sm_session);
     }
 }
 
 /**
- * @brief Cleans up file descriptor session list entry. Releases all resources
- * allocated by Session manager when a fd has been assigned to a session
- * (see ::sm_session_assign_fd).
+ * @brief Cleans up connection list entry. Releases all resources held in connection
+ * context by Session Manager and Connection Manager (via provided callback).
  * @note Called automatically when a node from fd avl tree is removed
  * (which is also when the tree itself is being destroyed).
  */
@@ -123,8 +128,10 @@ sm_connection_cleanup(void *connection_p)
             session = session->next;
             free(tmp);
         }
-        free(connection->in_buff.data);
-        free(connection->out_buff.data);
+        /* cleanup Connection Manager-related data */
+        if ((NULL != connection->sm_ctx) && (NULL != connection->sm_ctx->connection_cleanup_cb)) {
+            connection->sm_ctx->connection_cleanup_cb(connection);
+        }
         free(connection);
     }
 }
@@ -137,7 +144,7 @@ sm_connection_add_session(const sm_ctx_t *sm_ctx, sm_connection_t *connection, s
 {
     sm_session_list_t *session_item = NULL, *tmp = NULL;
 
-    CHECK_NULL_ARG2(sm_ctx, session);
+    CHECK_NULL_ARG3(sm_ctx, connection, session);
 
     session_item = calloc(1, sizeof(*session_item));
     if (NULL == session_item) {
@@ -168,6 +175,8 @@ sm_connection_remove_session(const sm_ctx_t *sm_ctx, sm_connection_t *connection
 {
     sm_session_list_t *tmp = NULL, *prev = NULL;
 
+    CHECK_NULL_ARG3(sm_ctx, connection, session);
+
     /* find matching session in linked list */
     tmp = connection->session_list;
     while ((NULL != tmp) && (tmp->session != session)) {
@@ -196,7 +205,7 @@ sm_connection_remove_session(const sm_ctx_t *sm_ctx, sm_connection_t *connection
 }
 
 int
-sm_init(sm_ctx_t **sm_ctx)
+sm_init(sm_cleanup_cb session_cleanup_cb, sm_cleanup_cb connection_cleanup_cb, sm_ctx_t **sm_ctx)
 {
     sm_ctx_t *ctx = NULL;
     int rc = SR_ERR_OK;
@@ -209,6 +218,8 @@ sm_init(sm_ctx_t **sm_ctx)
         rc = SR_ERR_NOMEM;
         goto cleanup;
     }
+    ctx->session_cleanup_cb = session_cleanup_cb;
+    ctx->connection_cleanup_cb = connection_cleanup_cb;
 
     /* create avl tree for fast session lookup by id,
      * with automatic cleanup when the session is removed from tree */
@@ -272,6 +283,7 @@ sm_connection_start(const sm_ctx_t *sm_ctx, const sm_connection_type_t type, con
         SR_LOG_ERR_MSG("Cannot allocate memory for new connection context.");
         return SR_ERR_NOMEM;
     }
+    connection->sm_ctx = (sm_ctx_t*)sm_ctx;
     connection->type = type;
     connection->fd = fd;
 
@@ -337,6 +349,7 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
         rc = SR_ERR_NOMEM;
         goto cleanup;
     }
+    session->sm_ctx = (sm_ctx_t*)sm_ctx;
 
     /* duplicate and set user names */
     session->real_user = strdup(real_user);
@@ -377,6 +390,7 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
         goto cleanup;
     }
 
+    /* add the session to connection's list */
     session->connection = connection;
     rc = sm_connection_add_session(sm_ctx, connection, session);
     if (SR_ERR_OK != rc) {
@@ -422,6 +436,11 @@ sm_session_find_id(const sm_ctx_t *sm_ctx, uint32_t session_id, sm_session_t **s
 
     CHECK_NULL_ARG2(sm_ctx, session);
 
+    if (SM_SESSION_ID_INVALID == session_id) {
+        SR_LOG_ERR_MSG("Invalid session id specified.");
+        return SR_ERR_INVAL_ARG;
+    }
+
     tmp.id = session_id;
     node = avl_search(sm_ctx->session_id_avl, &tmp);
 
@@ -455,6 +474,23 @@ sm_connection_find_fd(const sm_ctx_t *sm_ctx, const int fd, sm_connection_t **co
         return SR_ERR_NOT_FOUND;
     } else {
         *connection = node->item;
+        return SR_ERR_OK;
+    }
+}
+
+int
+sm_session_get_index(const sm_ctx_t *sm_ctx, uint32_t index, sm_session_t **session)
+{
+    avl_node_t *node = NULL;
+
+    CHECK_NULL_ARG2(sm_ctx, session);
+
+    node = avl_at(sm_ctx->session_id_avl, index);
+
+    if (NULL == node) {
+        return SR_ERR_NOT_FOUND;
+    } else {
+        *session = node->item;
         return SR_ERR_OK;
     }
 }
