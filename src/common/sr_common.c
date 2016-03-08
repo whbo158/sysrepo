@@ -25,8 +25,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <inttypes.h>
+#include <fcntl.h>
 
 #include "sr_common.h"
+#include "data_manager.h"
 
 /**
  * Sysrepo error descriptions.
@@ -43,15 +46,65 @@ const char *const sr_errlist[] = {
         "Malformed message",                    /* SR_ERR_MALFORMED_MSG */
         "Operation not supported",              /* SR_ERR_UNSUPPORTED */
         "Requested schema model is not known",  /* SR_ERR_UNKNOWN_MODEL */
+        "Request contains unknown element",     /* SR_ERR_BAD_ELEMENT */
+        "Validation of the changes failed",     /* SR_ERR_VALIDATION_FAILED */
+        "Commit operation failed",              /* SR_ERR_COMMIT_FAILED */
+        "The item already exists",              /* SR_ERR_DATA_EXISTS */
+        "The item expected to exist is missing",/* SR_ERR_DATA_MISSING */
+        "Operation not authorized",             /* SR_ERR_UNAUTHORIZED */
+        "Requested resource is already locked", /* SR_ERR_LOCKED */
 };
 
 const char *
 sr_strerror(int err_code)
 {
     if (err_code >= (sizeof(sr_errlist) / (sizeof *sr_errlist))) {
-        return NULL;
+        return "Unknown error";
     } else {
         return sr_errlist[err_code];
+    }
+}
+
+const char *
+sr_operation_name(Sr__Operation operation)
+{
+    switch (operation) {
+    case SR__OPERATION__SESSION_START:
+        return "session-start";
+    case SR__OPERATION__SESSION_STOP:
+        return "session-stop";
+    case SR__OPERATION__SESSION_REFRESH:
+        return "session-refresh";
+    case SR__OPERATION__LIST_SCHEMAS:
+        return "list-schemas";
+    case SR__OPERATION__GET_SCHEMA:
+        return "get-schema";
+    case SR__OPERATION__FEATURE_ENABLE:
+        return "feature-enable";
+    case SR__OPERATION__MODULE_ENABLE:
+        return "module-enable";
+    case SR__OPERATION__GET_ITEM:
+        return "get-item";
+    case SR__OPERATION__GET_ITEMS:
+        return "get-items";
+    case SR__OPERATION__SET_ITEM:
+        return "set-item";
+    case SR__OPERATION__DELETE_ITEM:
+        return "delete-item";
+    case SR__OPERATION__MOVE_ITEM:
+        return "move-item";
+    case SR__OPERATION__VALIDATE:
+        return "validate";
+    case SR__OPERATION__COMMIT:
+        return "commit";
+    case SR__OPERATION__DISCARD_CHANGES:
+        return "discard-changes";
+    case SR__OPERATION__LOCK:
+        return "lock";
+    case SR__OPERATION__UNLOCK:
+        return "unlock";
+    default:
+        return "unknown";
     }
 }
 
@@ -135,10 +188,10 @@ sr_cbuff_enqueue(sr_cbuff_t *buffer, void *item)
 
     pos = (buffer->head + buffer->count) % buffer->capacity;
 
-    SR_LOG_DBG("Circular buffer enqueue to position=%zu.", pos);
-
     memcpy(((uint8_t*)buffer->data + (pos * buffer->elem_size)), item, buffer->elem_size);
     buffer->count++;
+
+    SR_LOG_DBG("Circular buffer enqueue to position=%zu, current count=%zu.", pos, buffer->count);
 
     return SR_ERR_OK;
 }
@@ -146,7 +199,7 @@ sr_cbuff_enqueue(sr_cbuff_t *buffer, void *item)
 bool
 sr_cbuff_dequeue(sr_cbuff_t *buffer, void *item)
 {
-    if (0 == buffer->count) {
+    if (NULL == buffer || 0 == buffer->count) {
         return false;
     }
 
@@ -157,6 +210,16 @@ sr_cbuff_dequeue(sr_cbuff_t *buffer, void *item)
     SR_LOG_DBG("Circular buffer dequeue, new buffer head=%zu, count=%zu.", buffer->head, buffer->count);
 
     return true;
+}
+
+size_t
+sr_cbuff_items_in_queue(sr_cbuff_t *buffer)
+{
+    if (NULL != buffer) {
+        return buffer->count;
+    } else {
+        return 0;
+    }
 }
 
 int
@@ -199,25 +262,148 @@ sr_save_data_tree_file(const char *file_name, const struct lyd_node *data_tree)
         SR_LOG_ERR("Failed to open file %s", file_name);
         return SR_ERR_IO;
     }
+    lockf(fileno(f), F_LOCK, 0);
 
-    fprintf(f, "<module>");
-    if( 0 != lyd_print_file(f, data_tree, LYD_XML_FORMAT)){
+    if( 0 != lyd_print_file(f, data_tree, LYD_XML_FORMAT, LYP_WITHSIBLINGS)){
         SR_LOG_ERR("Failed to write output into %s", file_name);
         return SR_ERR_INTERNAL;
     }
-    fprintf(f, "</module>");
+    lockf(fileno(f), F_ULOCK, 0);
     fclose(f);
     return SR_ERR_OK;
 }
 
-void
-sr_free_datatree(struct lyd_node *root){
+struct lyd_node*
+sr_dup_datatree(struct lyd_node *root){
+    struct lyd_node *dup = NULL, *s = NULL, *n = NULL;
+
     struct lyd_node *next = NULL;
+    /* loop through top-level nodes*/
     while (NULL != root) {
         next = root->next;
-        lyd_free(root);
+
+        n = lyd_dup(root, 1);
+        /*set output node*/
+        if (NULL == dup){
+            dup = n;
+        }
+
+        if (NULL == s){
+            s = n;
+        }
+        else if (0 != lyd_insert_after(s, n)){
+            SR_LOG_ERR_MSG("Memory allocation failed");
+            lyd_free_withsiblings(dup);
+            return NULL;
+        }
+        /* last appended sibling*/
+        s = n;
+
         root = next;
     }
+    return dup;
+}
+
+int
+sr_lyd_unlink(dm_data_info_t *data_info, struct lyd_node *node)
+{
+    CHECK_NULL_ARG2(data_info, node);
+    if (node == data_info->node){
+        data_info->node = node->next;
+    }
+    if (0 != lyd_unlink(node)){
+        SR_LOG_ERR_MSG("Node unlink failed");
+        return SR_ERR_INTERNAL;
+    }
+    return SR_ERR_OK;
+}
+
+struct lyd_node *
+sr_lyd_new(dm_data_info_t *data_info, struct lyd_node *parent, const struct lys_module *module, const char* node_name)
+{
+    int rc = SR_ERR_OK;
+    CHECK_NULL_ARG_NORET3(rc, data_info, module, node_name);
+    if (SR_ERR_OK != rc){
+        return NULL;
+    }
+
+    struct lyd_node *new = NULL;
+    new = lyd_new(parent, module, node_name);
+
+    if (NULL == parent) {
+        if (NULL == data_info->node) {
+            data_info->node = new;
+        } else {
+            struct lyd_node *last_sibling = data_info->node;
+            while (NULL != last_sibling->next) {
+                last_sibling = last_sibling->next;
+            }
+            if (0 != lyd_insert_after(last_sibling, new)) {
+                SR_LOG_ERR_MSG("Append of top level node failed");
+                lyd_free(new);
+                return NULL;
+            }
+        }
+    }
+
+    return new;
+}
+
+struct lyd_node *
+sr_lyd_new_leaf(dm_data_info_t *data_info, struct lyd_node *parent, const struct lys_module *module, const char *node_name, const char *value)
+{
+    int rc = SR_ERR_OK;
+    CHECK_NULL_ARG_NORET4(rc, data_info, module, node_name, value);
+    if (SR_ERR_OK != rc){
+        return NULL;
+    }
+
+    struct lyd_node *new = NULL;
+    new = lyd_new_leaf(parent, module, node_name, value);
+
+    if (NULL == parent) {
+        if (NULL == data_info->node) {
+            data_info->node = new;
+        } else {
+            struct lyd_node *last_sibling = data_info->node;
+            while (NULL != last_sibling->next) {
+                last_sibling = last_sibling->next;
+            }
+            if (0 != lyd_insert_after(last_sibling, new)) {
+                SR_LOG_ERR_MSG("Append of top level node failed");
+                lyd_free(new);
+                return NULL;
+            }
+        }
+    }
+
+    return new;
+}
+
+int
+sr_lyd_insert_before(dm_data_info_t *data_info, struct lyd_node *sibling, struct lyd_node *node)
+{
+    CHECK_NULL_ARG3(data_info, sibling, node);
+
+    int rc = lyd_insert_before(sibling, node);
+    if (data_info->node == sibling) {
+        data_info->node = node;
+    }
+
+    return rc;
+}
+
+int
+sr_lyd_insert_after(dm_data_info_t *data_info, struct lyd_node *sibling, struct lyd_node *node)
+{
+    CHECK_NULL_ARG3(data_info, sibling, node);
+
+    int rc = lyd_insert_after(sibling, node);
+    if (data_info->node == node) {
+        data_info->node = sibling;
+    }
+
+    return rc;
 }
 
 sr_type_t
@@ -416,6 +602,14 @@ sr_pb_req_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__Ms
             sr__session_stop_req__init((Sr__SessionStopReq*)sub_msg);
             req->session_stop_req = (Sr__SessionStopReq*)sub_msg;
             break;
+        case SR__OPERATION__SESSION_REFRESH:
+            sub_msg = calloc(1, sizeof(Sr__SessionRefreshReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__session_refresh_req__init((Sr__SessionRefreshReq*)sub_msg);
+            req->session_refresh_req = (Sr__SessionRefreshReq*)sub_msg;
+            break;
         case SR__OPERATION__LIST_SCHEMAS:
             sub_msg = calloc(1, sizeof(Sr__ListSchemasReq));
             if (NULL == sub_msg) {
@@ -423,6 +617,30 @@ sr_pb_req_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__Ms
             }
             sr__list_schemas_req__init((Sr__ListSchemasReq*)sub_msg);
             req->list_schemas_req = (Sr__ListSchemasReq*)sub_msg;
+            break;
+        case SR__OPERATION__GET_SCHEMA:
+            sub_msg = calloc(1, sizeof(Sr__GetSchemaReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__get_schema_req__init((Sr__GetSchemaReq*)sub_msg);
+            req->get_schema_req = (Sr__GetSchemaReq*)sub_msg;
+            break;
+        case SR__OPERATION__FEATURE_ENABLE:
+            sub_msg = calloc(1, sizeof(Sr__FeatureEnableReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__feature_enable_req__init((Sr__FeatureEnableReq*)sub_msg);
+            req->feature_enable_req = (Sr__FeatureEnableReq*)sub_msg;
+            break;
+        case SR__OPERATION__MODULE_ENABLE:
+            sub_msg = calloc(1, sizeof(Sr__ModuleEnableReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__module_enable_req__init((Sr__ModuleEnableReq*)sub_msg);
+            req->module_enable_req = (Sr__ModuleEnableReq*)sub_msg;
             break;
         case SR__OPERATION__GET_ITEM:
             sub_msg = calloc(1, sizeof(Sr__GetItemReq));
@@ -439,6 +657,70 @@ sr_pb_req_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__Ms
             }
             sr__get_items_req__init((Sr__GetItemsReq*)sub_msg);
             req->get_items_req = (Sr__GetItemsReq*)sub_msg;
+            break;
+        case SR__OPERATION__SET_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__SetItemReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__set_item_req__init((Sr__SetItemReq*)sub_msg);
+            req->set_item_req = (Sr__SetItemReq*)sub_msg;
+            break;
+        case SR__OPERATION__DELETE_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__DeleteItemReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__delete_item_req__init((Sr__DeleteItemReq*)sub_msg);
+            req->delete_item_req = (Sr__DeleteItemReq*)sub_msg;
+            break;
+        case SR__OPERATION__MOVE_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__MoveItemReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__move_item_req__init((Sr__MoveItemReq*)sub_msg);
+            req->move_item_req = (Sr__MoveItemReq*)sub_msg;
+            break;
+        case SR__OPERATION__VALIDATE:
+            sub_msg = calloc(1, sizeof(Sr__ValidateReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__validate_req__init((Sr__ValidateReq*)sub_msg);
+            req->validate_req = (Sr__ValidateReq*)sub_msg;
+            break;
+        case SR__OPERATION__COMMIT:
+            sub_msg = calloc(1, sizeof(Sr__CommitReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__commit_req__init((Sr__CommitReq*)sub_msg);
+            req->commit_req = (Sr__CommitReq*)sub_msg;
+            break;
+        case SR__OPERATION__DISCARD_CHANGES:
+            sub_msg = calloc(1, sizeof(Sr__DiscardChangesReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__discard_changes_req__init((Sr__DiscardChangesReq*)sub_msg);
+            req->discard_changes_req = (Sr__DiscardChangesReq*)sub_msg;
+            break;
+        case SR__OPERATION__LOCK:
+            sub_msg = calloc(1, sizeof(Sr__LockReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__lock_req__init((Sr__LockReq*)sub_msg);
+            req->lock_req = (Sr__LockReq*)sub_msg;
+            break;
+        case SR__OPERATION__UNLOCK:
+            sub_msg = calloc(1, sizeof(Sr__UnlockReq));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__unlock_req__init((Sr__UnlockReq*)sub_msg);
+            req->unlock_req = (Sr__UnlockReq*)sub_msg;
             break;
         default:
             break;
@@ -500,6 +782,14 @@ sr_pb_resp_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__M
             sr__session_stop_resp__init((Sr__SessionStopResp*)sub_msg);
             resp->session_stop_resp = (Sr__SessionStopResp*)sub_msg;
             break;
+        case SR__OPERATION__SESSION_REFRESH:
+           sub_msg = calloc(1, sizeof(Sr__SessionRefreshResp));
+           if (NULL == sub_msg) {
+               goto nomem;
+           }
+           sr__session_refresh_resp__init((Sr__SessionRefreshResp*)sub_msg);
+           resp->session_refresh_resp = (Sr__SessionRefreshResp*)sub_msg;
+           break;
         case SR__OPERATION__LIST_SCHEMAS:
             sub_msg = calloc(1, sizeof(Sr__ListSchemasResp));
             if (NULL == sub_msg) {
@@ -507,6 +797,14 @@ sr_pb_resp_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__M
             }
             sr__list_schemas_resp__init((Sr__ListSchemasResp*)sub_msg);
             resp->list_schemas_resp = (Sr__ListSchemasResp*)sub_msg;
+            break;
+        case SR__OPERATION__GET_SCHEMA:
+            sub_msg = calloc(1, sizeof(Sr__GetSchemaResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__get_schema_resp__init((Sr__GetSchemaResp*)sub_msg);
+            resp->get_schema_resp = (Sr__GetSchemaResp*)sub_msg;
             break;
         case SR__OPERATION__GET_ITEM:
             sub_msg = calloc(1, sizeof(Sr__GetItemResp));
@@ -516,6 +814,22 @@ sr_pb_resp_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__M
             sr__get_item_resp__init((Sr__GetItemResp*)sub_msg);
             resp->get_item_resp = (Sr__GetItemResp*)sub_msg;
             break;
+        case SR__OPERATION__FEATURE_ENABLE:
+            sub_msg = calloc(1, sizeof(Sr__FeatureEnableResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__feature_enable_resp__init((Sr__FeatureEnableResp*)sub_msg);
+            resp->feature_enable_resp = (Sr__FeatureEnableResp*)sub_msg;
+            break;
+        case SR__OPERATION__MODULE_ENABLE:
+            sub_msg = calloc(1, sizeof(Sr__ModuleEnableResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__module_enable_resp__init((Sr__ModuleEnableResp*)sub_msg);
+            resp->module_enable_resp = (Sr__ModuleEnableResp*)sub_msg;
+            break;
         case SR__OPERATION__GET_ITEMS:
             sub_msg = calloc(1, sizeof(Sr__GetItemsResp));
             if (NULL == sub_msg) {
@@ -523,6 +837,70 @@ sr_pb_resp_alloc(const Sr__Operation operation, const uint32_t session_id, Sr__M
             }
             sr__get_items_resp__init((Sr__GetItemsResp*)sub_msg);
             resp->get_items_resp = (Sr__GetItemsResp*)sub_msg;
+            break;
+        case SR__OPERATION__SET_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__SetItemResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__set_item_resp__init((Sr__SetItemResp*)sub_msg);
+            resp->set_item_resp = (Sr__SetItemResp*)sub_msg;
+            break;
+        case SR__OPERATION__DELETE_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__DeleteItemResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__delete_item_resp__init((Sr__DeleteItemResp*)sub_msg);
+            resp->delete_item_resp = (Sr__DeleteItemResp*)sub_msg;
+            break;
+        case SR__OPERATION__MOVE_ITEM:
+            sub_msg = calloc(1, sizeof(Sr__MoveItemResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__move_item_resp__init((Sr__MoveItemResp*)sub_msg);
+            resp->move_item_resp = (Sr__MoveItemResp*)sub_msg;
+            break;
+        case SR__OPERATION__VALIDATE:
+            sub_msg = calloc(1, sizeof(Sr__ValidateResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__validate_resp__init((Sr__ValidateResp*)sub_msg);
+            resp->validate_resp = (Sr__ValidateResp*)sub_msg;
+            break;
+        case SR__OPERATION__COMMIT:
+            sub_msg = calloc(1, sizeof(Sr__CommitResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__commit_resp__init((Sr__CommitResp*)sub_msg);
+            resp->commit_resp = (Sr__CommitResp*)sub_msg;
+            break;
+        case SR__OPERATION__DISCARD_CHANGES:
+            sub_msg = calloc(1, sizeof(Sr__DiscardChangesResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__discard_changes_resp__init((Sr__DiscardChangesResp*)sub_msg);
+            resp->discard_changes_resp = (Sr__DiscardChangesResp*)sub_msg;
+            break;
+        case SR__OPERATION__LOCK:
+            sub_msg = calloc(1, sizeof(Sr__LockResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__lock_resp__init((Sr__LockResp*)sub_msg);
+            resp->lock_resp = (Sr__LockResp*)sub_msg;
+            break;
+        case SR__OPERATION__UNLOCK:
+            sub_msg = calloc(1, sizeof(Sr__UnlockResp));
+            if (NULL == sub_msg) {
+                goto nomem;
+            }
+            sr__unlock_resp__init((Sr__UnlockResp*)sub_msg);
+            resp->unlock_resp = (Sr__UnlockResp*)sub_msg;
             break;
         default:
             break;
@@ -558,8 +936,24 @@ sr_pb_msg_validate(const Sr__Msg *msg, const Sr__Msg__MsgType type, const Sr__Op
                 if (NULL == msg->request->session_stop_req)
                     return SR_ERR_MALFORMED_MSG;
                 break;
+            case SR__OPERATION__SESSION_REFRESH:
+                if (NULL == msg->request->session_refresh_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
             case SR__OPERATION__LIST_SCHEMAS:
                 if (NULL == msg->request->list_schemas_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__GET_SCHEMA:
+                if (NULL == msg->request->get_schema_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__FEATURE_ENABLE:
+                if (NULL == msg->request->feature_enable_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__MODULE_ENABLE:
+                if (NULL == msg->request->module_enable_req)
                     return SR_ERR_MALFORMED_MSG;
                 break;
             case SR__OPERATION__GET_ITEM:
@@ -568,6 +962,38 @@ sr_pb_msg_validate(const Sr__Msg *msg, const Sr__Msg__MsgType type, const Sr__Op
                 break;
             case SR__OPERATION__GET_ITEMS:
                 if (NULL == msg->request->get_items_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__SET_ITEM:
+                if (NULL == msg->request->set_item_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__DELETE_ITEM:
+                if (NULL == msg->request->delete_item_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__MOVE_ITEM:
+                if (NULL == msg->request->move_item_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__VALIDATE:
+                if (NULL == msg->request->validate_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__COMMIT:
+                if (NULL == msg->request->commit_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__DISCARD_CHANGES:
+                if (NULL == msg->request->discard_changes_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__LOCK:
+                if (NULL == msg->request->lock_req)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__UNLOCK:
+                if (NULL == msg->request->unlock_req)
                     return SR_ERR_MALFORMED_MSG;
                 break;
             default:
@@ -587,8 +1013,16 @@ sr_pb_msg_validate(const Sr__Msg *msg, const Sr__Msg__MsgType type, const Sr__Op
                 if (NULL == msg->response->session_stop_resp)
                     return SR_ERR_MALFORMED_MSG;
                 break;
+            case SR__OPERATION__SESSION_REFRESH:
+                if (NULL == msg->response->session_refresh_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
             case SR__OPERATION__LIST_SCHEMAS:
                 if (NULL == msg->response->list_schemas_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__GET_SCHEMA:
+                if (NULL == msg->response->get_schema_resp)
                     return SR_ERR_MALFORMED_MSG;
                 break;
             case SR__OPERATION__GET_ITEM:
@@ -597,6 +1031,38 @@ sr_pb_msg_validate(const Sr__Msg *msg, const Sr__Msg__MsgType type, const Sr__Op
                 break;
             case SR__OPERATION__GET_ITEMS:
                 if (NULL == msg->response->get_items_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__SET_ITEM:
+                if (NULL == msg->response->set_item_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__DELETE_ITEM:
+                if (NULL == msg->response->delete_item_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__MOVE_ITEM:
+                if (NULL == msg->response->move_item_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__VALIDATE:
+                if (NULL == msg->response->validate_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__COMMIT:
+                if (NULL == msg->response->commit_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__DISCARD_CHANGES:
+                if (NULL == msg->response->discard_changes_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__LOCK:
+                if (NULL == msg->response->lock_resp)
+                    return SR_ERR_MALFORMED_MSG;
+                break;
+            case SR__OPERATION__UNLOCK:
+                if (NULL == msg->response->unlock_resp)
                     return SR_ERR_MALFORMED_MSG;
                 break;
             default:
@@ -632,7 +1098,10 @@ sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
     struct ucred cred = { 0, };
     socklen_t len = sizeof(cred);
 
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0) {
+    CHECK_NULL_ARG2(uid, gid);
+
+    if (-1 == getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len)) {
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
         return SR_ERR_INTERNAL;
     }
     *uid = cred.uid;
@@ -652,12 +1121,20 @@ sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
 {
     ucred_t *ucred = NULL;
 
-    if (getpeerucred(fd, &ucred) == -1)
+    CHECK_NULL_ARG2(uid, gid);
+
+    if (-1 == getpeerucred(fd, &ucred)) {
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
         return SR_ERR_INTERNAL;
-    if ((*uid = ucred_geteuid(ucred)) == -1)
+    }
+    if (-1 == (*uid = ucred_geteuid(ucred))) {
+        ucred_free(ucred);
         return SR_ERR_INTERNAL;
-    if ((*gid = ucred_getrgid(ucred)) == -1)
+    }
+    if (-1 == (*gid = ucred_getegid(ucred))) {
+        ucred_free(ucred);
         return SR_ERR_INTERNAL;
+    }
 
     ucred_free(ucred);
     return SR_ERR_OK;
@@ -671,12 +1148,15 @@ int
 sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
 {
     int ret = 0;
-    ret = getpeereid(int fd, uid, gid);
 
+    CHECK_NULL_ARG2(uid, gid);
+
+    ret = getpeereid(fd, uid, gid);
     if (-1 == ret) {
-        return SR_ERR_OK;
-    } else {
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
         return SR_ERR_INTERNAL;
+    } else {
+        return SR_ERR_OK;
     }
 }
 
@@ -761,12 +1241,14 @@ sr_set_val_t_type_in_gpb(const sr_val_t *value, Sr__Value *gpb_value){
 
 static int
 sr_set_val_t_value_in_gpb(const sr_val_t *value, Sr__Value *gpb_value){
-    CHECK_NULL_ARG3(value, gpb_value, value->xpath);
+    CHECK_NULL_ARG2(value, gpb_value);
 
-    gpb_value->path = strdup(value->xpath);
-    if (NULL == gpb_value->path){
-        SR_LOG_ERR_MSG("Memory allocation failed");
-        return  SR_ERR_NOMEM;
+    if (NULL != value->xpath) {
+        gpb_value->path = strdup(value->xpath);
+        if (NULL == gpb_value->path){
+            SR_LOG_ERR_MSG("Memory allocation failed");
+            return  SR_ERR_NOMEM;
+        }
     }
 
     switch (value->type) {
@@ -1127,15 +1609,11 @@ sr_datastore_sr_to_gpb(const sr_datastore_t sr_ds)
     switch (sr_ds) {
         case SR_DS_RUNNING:
             return SR__DATA_STORE__RUNNING;
-            break;
-        case SR_DS_CANDIDATE:
-            return SR__DATA_STORE__CANDIDATE;
-            break;
         case SR_DS_STARTUP:
+            /* fall through */
+        default:
             return SR__DATA_STORE__STARTUP;
-            break;
     }
-    return SR__DATA_STORE__RUNNING;
 }
 
 sr_datastore_t
@@ -1144,17 +1622,56 @@ sr_datastore_gpb_to_sr(Sr__DataStore gpb_ds)
     switch (gpb_ds) {
         case SR__DATA_STORE__RUNNING:
             return SR_DS_RUNNING;
-            break;
-        case SR__DATA_STORE__CANDIDATE:
-            return SR_DS_CANDIDATE;
-            break;
         case SR__DATA_STORE__STARTUP:
-            return SR_DS_STARTUP;
-            break;
+            /* fall through */
         default:
-            return SR_DS_RUNNING;
+            return SR_DS_STARTUP;
     }
-    return SR_DS_RUNNING;
+}
+
+Sr__MoveItemReq__MoveDirection
+sr_move_direction_sr_to_gpb(sr_move_direction_t sr_direction)
+{
+    switch (sr_direction) {
+        case SR_MOVE_UP:
+            return SR__MOVE_ITEM_REQ__MOVE_DIRECTION__UP;
+        case SR_MOVE_DOWN:
+            /* fall through */
+        default:
+            return SR__MOVE_ITEM_REQ__MOVE_DIRECTION__DOWN;
+    }
+}
+
+sr_move_direction_t
+sr_move_direction_gpb_to_sr(Sr__MoveItemReq__MoveDirection gpb_direction)
+{
+    switch (gpb_direction) {
+        case SR__MOVE_ITEM_REQ__MOVE_DIRECTION__UP:
+            return SR_MOVE_UP;
+        case SR__MOVE_ITEM_REQ__MOVE_DIRECTION__DOWN:
+            /* fall through */
+        default:
+            return SR_MOVE_DOWN;
+    }
+}
+
+void sr_free_schema(sr_schema_t *schema)
+{
+    if (NULL != schema) {
+        free((void*)schema->module_name);
+        free((void*)schema->prefix);
+        free((void*)schema->ns);
+        free((void*)schema->revision.revision);
+        free((void*)schema->revision.file_path_yin);
+        free((void*)schema->revision.file_path_yang);
+        for (size_t s = 0; s < schema->submodule_count; s++){
+            free((void*)schema->submodules[s].submodule_name);
+            free((void*)schema->submodules[s].revision.revision);
+            free((void*)schema->submodules[s].revision.file_path_yin);
+            free((void*)schema->submodules[s].revision.file_path_yang);
+        }
+        free(schema->submodules);
+    }
 }
 
 void
@@ -1162,11 +1679,7 @@ sr_free_schemas(sr_schema_t *schemas, size_t count)
 {
     if (NULL != schemas) {
         for (size_t i = 0; i < count; i++) {
-            free(schemas[i].module_name);
-            free(schemas[i].prefix);
-            free(schemas[i].ns);
-            free(schemas[i].revision);
-            free(schemas[i].file_path);
+            sr_free_schema(&schemas[i]);
         }
         free(schemas);
     }
@@ -1214,17 +1727,75 @@ sr_schemas_sr_to_gpb(const sr_schema_t *sr_schemas, const size_t schema_cnt, Sr_
                 goto nomem;
             }
         }
-        if (NULL != sr_schemas[i].revision) {
-            schemas[i]->revision = strdup(sr_schemas[i].revision);
-            if (NULL == schemas[i]->revision) {
+
+        schemas[i]->revision = calloc(1, sizeof (*schemas[i]->revision));
+        if (NULL == schemas[i]->revision) {
+            goto nomem;
+        }
+        sr__schema_rev__init(schemas[i]->revision);
+        if (NULL != sr_schemas[i].revision.revision) {
+            schemas[i]->revision->revision = strdup(sr_schemas[i].revision.revision);
+            if (NULL == schemas[i]->revision->revision) {
                 goto nomem;
             }
         }
-        if (NULL != sr_schemas[i].file_path) {
-            schemas[i]->file_path = strdup(sr_schemas[i].file_path);
-            if (NULL == schemas[i]->file_path) {
+        if (NULL != sr_schemas[i].revision.file_path_yang) {
+            schemas[i]->revision->file_path_yang = strdup(sr_schemas[i].revision.file_path_yang);
+            if (NULL == schemas[i]->revision->file_path_yang) {
                 goto nomem;
             }
+        }
+        if (NULL != sr_schemas[i].revision.file_path_yin) {
+            schemas[i]->revision->file_path_yin = strdup(sr_schemas[i].revision.file_path_yin);
+            if (NULL == schemas[i]->revision->file_path_yin) {
+                goto nomem;
+            }
+        }
+
+
+        schemas[i]->submodules = calloc(sr_schemas[i].submodule_count, sizeof(*schemas[i]->submodules));
+        if (NULL == schemas[i]->submodules){
+            goto nomem;
+        }
+        schemas[i]->n_submodules = sr_schemas[i].submodule_count;
+
+        for (size_t s = 0; s < sr_schemas[i].submodule_count; s++) {
+            schemas[i]->submodules[s] = calloc(1, sizeof (*schemas[i]->submodules[s]));
+            if (NULL == schemas[i]->submodules[s]) {
+                goto nomem;
+            }
+            sr__schema_submodule__init(schemas[i]->submodules[s]);
+            if (NULL != sr_schemas[i].submodules[s].submodule_name) {
+                schemas[i]->submodules[s]->submodule_name = strdup(sr_schemas[i].submodules[s].submodule_name);
+                if (NULL == schemas[i]->submodules[s]->submodule_name) {
+                    goto nomem;
+                }
+            }
+
+            schemas[i]->submodules[s]->revision = calloc(1, sizeof (*schemas[i]->submodules[s]->revision));
+            if (NULL == schemas[i]->submodules[s]->revision) {
+                goto nomem;
+            }
+            sr__schema_rev__init(schemas[i]->submodules[s]->revision);
+            if (NULL != sr_schemas[i].submodules[s].revision.revision) {
+                schemas[i]->submodules[s]->revision->revision = strdup(sr_schemas[i].submodules[s].revision.revision);
+                if (NULL == schemas[i]->submodules[s]->revision->revision) {
+                    goto nomem;
+                }
+            }
+            if (NULL != sr_schemas[i].submodules[s].revision.file_path_yang) {
+                schemas[i]->submodules[s]->revision->file_path_yang = strdup(sr_schemas[i].submodules[s].revision.file_path_yang);
+                if (NULL == schemas[i]->submodules[s]->revision->file_path_yang) {
+                    goto nomem;
+                }
+            }
+            if (NULL != sr_schemas[i].submodules[s].revision.file_path_yin) {
+                schemas[i]->submodules[s]->revision->file_path_yin = strdup(sr_schemas[i].submodules[s].revision.file_path_yin);
+                if (NULL == schemas[i]->submodules[s]->revision->file_path_yin) {
+                    goto nomem;
+                }
+            }
+
         }
     }
 
@@ -1277,18 +1848,61 @@ sr_schemas_gpb_to_sr(const Sr__Schema **gpb_schemas, const size_t schema_cnt, sr
                 goto nomem;
             }
         }
-        if (NULL != gpb_schemas[i]->revision) {
-            schemas[i].revision = strdup(gpb_schemas[i]->revision);
-            if (NULL == schemas[i].revision) {
+
+        if (NULL != gpb_schemas[i]->revision->revision) {
+            schemas[i].revision.revision = strdup(gpb_schemas[i]->revision->revision);
+            if (NULL == schemas[i].revision.revision) {
                 goto nomem;
             }
         }
-        if (NULL != gpb_schemas[i]->file_path) {
-            schemas[i].file_path = strdup(gpb_schemas[i]->file_path);
-            if (NULL == schemas[i].file_path) {
+        if (NULL != gpb_schemas[i]->revision->file_path_yang) {
+            schemas[i].revision.file_path_yang = strdup(gpb_schemas[i]->revision->file_path_yang);
+            if (NULL == schemas[i].revision.file_path_yang) {
                 goto nomem;
             }
         }
+        if (NULL != gpb_schemas[i]->revision->file_path_yin) {
+            schemas[i].revision.file_path_yin = strdup(gpb_schemas[i]->revision->file_path_yin);
+            if (NULL == schemas[i].revision.file_path_yin) {
+                goto nomem;
+            }
+        }
+
+
+        schemas[i].submodules = calloc(gpb_schemas[i]->n_submodules, sizeof(*schemas[i].submodules));
+        if (NULL == schemas[i].submodules) {
+            goto nomem;
+        }
+        for (size_t s = 0; s < gpb_schemas[i]->n_submodules; s++) {
+            if (NULL != gpb_schemas[i]->submodules[s]->submodule_name) {
+                schemas[i].submodules[s].submodule_name = strdup(gpb_schemas[i]->submodules[s]->submodule_name);
+                if (NULL == schemas[i].submodules[s].submodule_name) {
+                    goto nomem;
+                }
+            }
+
+            if (NULL != gpb_schemas[i]->submodules[s]->revision->revision) {
+                schemas[i].submodules[s].revision.revision = strdup(gpb_schemas[i]->submodules[s]->revision->revision);
+                if (NULL == schemas[i].submodules[s].revision.revision) {
+                    goto nomem;
+                }
+            }
+            if (NULL != gpb_schemas[i]->submodules[s]->revision->file_path_yang) {
+                schemas[i].submodules[s].revision.file_path_yang = strdup(gpb_schemas[i]->submodules[s]->revision->file_path_yang);
+                if (NULL == schemas[i].submodules[s].revision.file_path_yang) {
+                    goto nomem;
+                }
+            }
+            if (NULL != gpb_schemas[i]->submodules[s]->revision->file_path_yin) {
+                schemas[i].submodules[s].revision.file_path_yin = strdup(gpb_schemas[i]->submodules[s]->revision->file_path_yin);
+                if (NULL == schemas[i].submodules[s].revision.file_path_yin) {
+                    goto nomem;
+                }
+            }
+
+            schemas[i].submodule_count++;
+        }
+
     }
 
     *sr_schemas = schemas;
@@ -1300,3 +1914,284 @@ nomem:
     return SR_ERR_NOMEM;
 }
 
+static int
+sr_dec64_to_str(double val, struct lys_node *schema_node, char **out)
+{
+    CHECK_NULL_ARG2(schema_node, out);
+    size_t fraction_digits = 0;
+    if (LYS_LEAF == schema_node->nodetype || LYS_LEAFLIST == schema_node->nodetype) {
+        struct lys_node_leaflist *l = (struct lys_node_leaflist *) schema_node;
+        fraction_digits = l->type.info.dec64.dig;
+    } else {
+        SR_LOG_ERR_MSG("Node must be either leaf or leaflist");
+        return SR_ERR_INVAL_ARG;
+    }
+    /* format string for double string conversion "%.XXf", where XX is corresponding number of fraction digits 1-18 */
+#define MAX_FMT_LEN 6
+    char format_string [MAX_FMT_LEN] = {0,};
+    snprintf(format_string, MAX_FMT_LEN, "%%.%zuf", fraction_digits);
+
+    size_t len = snprintf(NULL, 0, format_string, val);
+    *out = calloc(len + 1, sizeof(**out));
+    if (NULL == *out) {
+        SR_LOG_ERR_MSG("Memory allocation failed");
+        return SR_ERR_NOMEM;
+    }
+    snprintf(*out, len + 1, format_string, val);
+    return SR_ERR_OK;
+}
+
+int
+sr_val_to_str(const sr_val_t *value, struct lys_node *schema_node, char **out)
+{
+    CHECK_NULL_ARG3(value, schema_node, out);
+    size_t len = 0;
+    switch (value->type) {
+    case SR_BINARY_T:
+        *out = strdup(value->data.binary_val);
+        break;
+    case SR_BITS_T:
+        *out = strdup(value->data.bits_val);
+        break;
+    case SR_BOOL_T:
+        *out = value->data.bool_val ? strdup("true") : strdup("false");
+        break;
+    case SR_DECIMAL64_T:
+        return sr_dec64_to_str(value->data.decimal64_val, schema_node, out);
+    case SR_ENUM_T:
+        *out = strdup(value->data.enum_val);
+        break;
+    case SR_LEAF_EMPTY_T:
+        *out = strdup("");
+        break;
+    case SR_IDENTITYREF_T:
+        *out = strdup(value->data.identityref_val);
+        break;
+    case SR_INSTANCEID_T:
+        *out = strdup(value->data.instanceid_val);
+        break;
+    case SR_INT8_T:
+        len = snprintf(NULL, 0, "%"PRId8, value->data.int8_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRId8, value->data.int8_val);
+        break;
+    case SR_INT16_T:
+        len = snprintf(NULL, 0, "%"PRId16, value->data.int16_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRId16, value->data.int16_val);
+        break;
+    case SR_INT32_T:
+        len = snprintf(NULL, 0, "%"PRId32, value->data.int32_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRId32, value->data.int32_val);
+        break;
+    case SR_INT64_T:
+        len = snprintf(NULL, 0, "%"PRId64, value->data.int64_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRId64, value->data.int64_val);
+        break;
+    case SR_LEAFREF_T:
+        *out = strdup(value->data.leafref_val);
+        break;
+    case SR_STRING_T:
+        *out = strdup(value->data.string_val);
+        break;
+    case SR_UINT8_T:
+        len = snprintf(NULL, 0, "%"PRIu8, value->data.uint8_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRIu8, value->data.uint8_val);
+        break;
+    case SR_UINT16_T:
+        len = snprintf(NULL, 0, "%"PRIu16, value->data.uint16_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRIu16, value->data.uint16_val);
+        break;
+    case SR_UINT32_T:
+        len = snprintf(NULL, 0, "%"PRIu32, value->data.uint32_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRIu32, value->data.uint32_val);
+        break;
+    case SR_UINT64_T:
+        len = snprintf(NULL, 0, "%"PRIu64, value->data.uint64_val);
+        *out = calloc(len + 1, sizeof(**out));
+        snprintf(*out, len + 1, "%"PRIu64, value->data.uint64_val);
+        break;
+    default:
+        SR_LOG_ERR_MSG("Conversion of value_t to string failed");
+        *out = NULL;
+    }
+    if (NULL == *out) {
+        SR_LOG_ERR("String copy failed %s", value->xpath);
+        return SR_ERR_INTERNAL;
+    }
+    return SR_ERR_OK;
+}
+
+int
+sr_gpb_fill_error(const char *error_message, const char *error_path, Sr__Error **gpb_error_p)
+{
+    Sr__Error *gpb_error = NULL;
+
+    CHECK_NULL_ARG(gpb_error_p);
+
+    gpb_error = calloc(1, sizeof(*gpb_error));
+    if (NULL == gpb_error) {
+        goto nomem;
+    }
+    sr__error__init(gpb_error);
+    if (NULL != error_message) {
+        gpb_error->message = strdup(error_message);
+        if (NULL == gpb_error->message) {
+            goto nomem;
+        }
+    }
+    if (NULL != error_path) {
+        gpb_error->path = strdup(error_path);
+        if (NULL == gpb_error->path) {
+            goto nomem;
+        }
+    }
+
+    *gpb_error_p = gpb_error;
+    return SR_ERR_OK;
+
+nomem:
+    if (NULL != gpb_error) {
+        sr__error__free_unpacked(gpb_error, NULL);
+    }
+    SR_LOG_ERR_MSG("GPB error allocation failed.");
+    return SR_ERR_NOMEM;
+}
+
+int
+sr_gpb_fill_errors(sr_error_info_t *sr_errors, size_t sr_error_cnt, Sr__Error ***gpb_errors_p, size_t *gpb_error_cnt_p)
+{
+    Sr__Error **gpb_errors = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(sr_errors, gpb_errors_p, gpb_error_cnt_p);
+
+    gpb_errors = calloc(sr_error_cnt, sizeof(*gpb_errors));
+    if (NULL == gpb_errors) {
+        SR_LOG_ERR_MSG("GPB error array allocation failed.");
+        return SR_ERR_NOMEM;
+    }
+
+    for (size_t i = 0; i < sr_error_cnt; i++) {
+        rc = sr_gpb_fill_error(sr_errors[i].message, sr_errors[i].path, &gpb_errors[i]);
+        if (SR_ERR_OK != rc) {
+            for (size_t j = 0; j < i; j++) {
+                sr__error__free_unpacked(gpb_errors[j], NULL);
+            }
+            free(gpb_errors);
+            return rc;
+        }
+    }
+
+    *gpb_errors_p = gpb_errors;
+    *gpb_error_cnt_p = sr_error_cnt;
+
+    return SR_ERR_OK;
+}
+
+void
+sr_free_errors(sr_error_info_t *errors, size_t error_cnt)
+{
+    if (NULL != errors) {
+        for (size_t i = 0; i < error_cnt; i++) {
+            free((void*)errors[i].path);
+            free((void*)errors[i].message);
+        }
+        free(errors);
+    }
+}
+
+int
+sr_get_data_file_name(const char *data_search_dir, const char *module_name, const sr_datastore_t ds, char **file_name)
+{
+    CHECK_NULL_ARG2(module_name, file_name);
+    char *tmp = NULL;
+    int rc = sr_str_join(data_search_dir, module_name, &tmp);
+    if (SR_ERR_OK == rc) {
+        char *suffix = SR_DS_STARTUP == ds ? SR_STARTUP_FILE_EXT : SR_RUNNING_FILE_EXT;
+        rc = sr_str_join(tmp, suffix, file_name);
+        free(tmp);
+        return rc;
+    }
+    return SR_ERR_NOMEM;
+}
+
+int
+sr_get_schema_file_name(const char *schema_search_dir, const char *module_name, const char *rev_date, bool yang_format, char **file_name)
+{
+    CHECK_NULL_ARG2(module_name, file_name);
+    char *tmp = NULL, *tmp2 = NULL;
+    int rc = sr_str_join(schema_search_dir, module_name, &tmp);
+    if (NULL != rev_date) {
+        if (SR_ERR_OK != rc) {
+            return rc;
+        }
+        rc = sr_str_join(tmp, "@", &tmp2);
+        if (SR_ERR_OK != rc) {
+            free(tmp);
+            return rc;
+        }
+        free(tmp);
+        tmp = NULL;
+        rc = sr_str_join(tmp2, rev_date, &tmp);
+        free(tmp2);
+    }
+    if (SR_ERR_OK == rc) {
+        rc = sr_str_join(tmp, yang_format ? SR_SCHEMA_YANG_FILE_EXT : SR_SCHEMA_YIN_FILE_EXT, file_name);
+        free(tmp);
+        return rc;
+    }
+    free(tmp);
+    return SR_ERR_NOMEM;
+}
+
+static int
+sr_lock_fd_internal(int fd, bool lock, bool write, bool wait)
+{
+    int ret = -1;
+    struct flock fl = { 0, };
+
+    if (lock) {
+        /* lock */
+        fl.l_type = write ? F_WRLCK : F_RDLCK;
+    } else {
+        /* unlock */
+        fl.l_type = F_UNLCK;
+    }
+    fl.l_whence = SEEK_SET; /* from the beginning */
+    fl.l_start = 0;         /* with offset 0*/
+    fl.l_len = 0;           /* to EOF */
+    fl.l_pid = getpid();
+
+    /* set the lock, waiting if requested and necessary */
+    ret = fcntl(fd, wait ? F_SETLKW : F_SETLK, &fl);
+
+    if (-1 == ret) {
+        SR_LOG_WRN("Unable to acquire the lock on fd %d: %s", fd, strerror(errno));
+        if (!wait && (EAGAIN == errno || EACCES == errno)) {
+            /* already locked by someone else */
+            return SR_ERR_LOCKED;
+        } else {
+            return SR_ERR_INTERNAL;
+        }
+    }
+
+    return SR_ERR_OK;
+}
+
+int
+sr_lock_fd(int fd, bool write, bool wait)
+{
+    return sr_lock_fd_internal(fd, true, write, wait);
+}
+
+int
+sr_unlock_fd(int fd)
+{
+    return sr_lock_fd_internal(fd, false, false, false);
+}

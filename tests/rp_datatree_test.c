@@ -1,7 +1,7 @@
 /**
  * @file rp_datatree_test.c
  * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
- * @brief 
+ * @brief
  *
  * @copyright
  * Copyright 2015 Cisco Systems, Inc.
@@ -31,21 +31,21 @@
 #include "sr_common.h"
 #include "rp_data_tree.h"
 #include "xpath_processor.h"
+#include "dt_xpath_helpers.h"
+#include "test_module_helper.h"
+#include "rp_dt_context_helper.h"
+#include "rp_internal.h"
 
 #define LEAF_VALUE "leafV"
 
 int setup(void **state){
-   int rc = 0;
-   dm_ctx_t *ctx;
-   rc = dm_init(TEST_SCHEMA_SEARCH_DIR, TEST_DATA_SEARCH_DIR, &ctx);
-   assert_int_equal(SR_ERR_OK,rc);
-   *state = ctx;
-   return rc;
+   test_rp_ctx_create((rp_ctx_t**)state);
+   return 0;
 }
 
 int teardown(void **state){
-    dm_ctx_t *ctx = *state;
-    dm_cleanup(ctx);
+    rp_ctx_t *ctx = *state;
+    test_rp_ctx_cleanup(ctx);
     return 0;
 }
 
@@ -98,103 +98,6 @@ void createDataTreeWithAugments(struct ly_ctx *ctx, struct lyd_node **root){
 
 }
 
-void createDataTreeTestModule(struct ly_ctx *ctx, struct lyd_node **root){
-    struct lyd_node *node = NULL;
-    struct lyd_node *n = NULL;
-
-    const struct lys_module *module = ly_ctx_get_module(ctx, "test-module",NULL);
-    assert_non_null(module);
-
-    *root = lyd_new(NULL, module, "main");
-    assert_non_null(*root);
-    node = lyd_new_leaf(*root, module, "enum", "maybe");
-    assert_non_null(node);
-    /*Hello world!  (base64 encoded)*/
-    node = lyd_new_leaf(*root, module, "raw", "SGVsbG8gd29ybGQh");
-    assert_non_null(node);
-
-    /*Strict = 1, Recursive = 1, Loggin = 0*/
-    node = lyd_new_leaf(*root, module, "options", "strict recursive");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "dec64", "9.85");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "i8", "8");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "i16", "16");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "i32", "32");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "i64", "64");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "ui8", "8");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "ui16", "16");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "ui32", "32");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "ui64", "64");
-    assert_non_null(node);
-
-    node = lyd_new_leaf(*root, module, "empty", "");
-    assert_non_null(node);
-
-    /* leaf -list*/
-    n = lyd_new_leaf(*root, module, "numbers", "1");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(*root, module, "numbers", "2");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(*root, module, "numbers", "42");
-    assert_non_null(n);
-
-    /* list k1*/
-    node = lyd_new(NULL, module, "list");
-    assert_non_null(node);
-    assert_int_equal(0,lyd_insert_after(*root, node));
-
-    n = lyd_new_leaf(node, module, "key", "k1");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(node, module, "id_ref", "id_1");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(node, module, "union", "42");
-    assert_non_null(n);
-
-    /* presence container*/
-    n = lyd_new(node, module, "wireless");
-    assert_non_null(n);
-
-    /* list k2*/
-    node = lyd_new(NULL, module, "list");
-    assert_non_null(node);
-    assert_int_equal(0, lyd_insert_after(*root, node));
-
-    n = lyd_new_leaf(node, module, "key", "k2");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(node, module, "id_ref", "id_2");
-    assert_non_null(n);
-
-    n = lyd_new_leaf(node, module, "union", "infinity");
-    assert_non_null(n);
-
-    assert_int_equal(0, lyd_validate(*root, LYD_OPT_STRICT));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR "test-module.data", *root));
-
-
-}
-
 void createDataTreeIETFinterfaces(struct ly_ctx *ctx, struct lyd_node **root){
 
     const struct lys_module *module_interfaces = ly_ctx_get_module(ctx, "ietf-interfaces", NULL);
@@ -234,7 +137,7 @@ void createDataTreeIETFinterfaces(struct ly_ctx *ctx, struct lyd_node **root){
     lyd_new_leaf(node, module_interfaces, "enabled", "false");
 
     assert_int_equal(0, lyd_validate(*root, LYD_OPT_STRICT));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces.data", *root));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, *root));
 
 }
 
@@ -247,15 +150,15 @@ void check_ietf_interfaces_int_values(sr_val_t **values, size_t count){
         xp_loc_id_t *loc_id = NULL;
         sr_val_t *v = values[i];
         assert_int_equal(SR_ERR_OK, xp_char_to_loc_id(v->xpath, &loc_id));
-        if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "name")){
+        if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "name")){
             assert_int_equal(SR_STRING_T, v->type);
             assert_string_equal("eth0", v->data.string_val);
         }
-        else if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "type")){
+        else if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "type")){
             assert_int_equal(SR_IDENTITYREF_T, v->type);
             assert_string_equal("ethernetCsmacd", v->data.identityref_val);
         }
-        else if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "enabled")){
+        else if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "enabled")){
             assert_int_equal(SR_BOOL_T, v->type);
             assert_true(v->data.bool_val);
         }
@@ -272,15 +175,15 @@ void check_ietf_interfaces_ipv4_values(sr_val_t **values, size_t count){
          xp_loc_id_t *loc_id = NULL;
          sr_val_t *v = values[i];
          assert_int_equal(SR_ERR_OK, xp_char_to_loc_id(v->xpath, &loc_id));
-         if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "enabled")){
+         if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "enabled")){
              assert_int_equal(SR_BOOL_T, v->type);
              assert_true(v->data.bool_val);
          }
-         else if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "mtu")){
+         else if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "mtu")){
              assert_int_equal(SR_UINT16_T, v->type);
              assert_int_equal(1500, v->data.uint32_val);
          }
-         else if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "address")){
+         else if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "address")){
              assert_int_equal(SR_LIST_T, v->type);
          }
          xp_free_loc_id(loc_id);
@@ -297,11 +200,11 @@ void check_ietf_interfaces_addr_values(sr_val_t **values, size_t count){
         xp_loc_id_t *loc_id = NULL;
         sr_val_t *v = values[i];
         assert_int_equal(SR_ERR_OK, xp_char_to_loc_id(v->xpath, &loc_id));
-        if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "ip")){
+        if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "ip")){
             assert_int_equal(SR_STRING_T, v->type);
             assert_string_equal("192.168.2.100", v->data.string_val);
         }
-        else if (XP_CMP_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "prefix-length")){
+        else if (XP_EQ_NODE(loc_id, XP_GET_NODE_COUNT(loc_id)-1, "prefix-length")){
             assert_int_equal(SR_UINT8_T, v->type);
             assert_int_equal(24, v->data.uint8_val);
         }
@@ -311,10 +214,11 @@ void check_ietf_interfaces_addr_values(sr_val_t **values, size_t count){
 
 void ietf_interfaces_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -369,28 +273,26 @@ void ietf_interfaces_test(void **state){
     }
     free(values);
 
-    sr_free_datatree(root);
+    lyd_free_withsiblings(root);
     dm_session_stop(ctx, ses_ctx);
 }
 
 
 void get_values_test_module_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
-    struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
-    rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
-    assert_int_equal(SR_ERR_OK, rc);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
 
     struct lyd_node *root = NULL;
-    createDataTreeTestModule(data_tree->schema->module->ctx, &root);
+    createDataTreeTestModule();
+    dm_get_datatree(ctx, ses_ctx, "test-module", &root);
     assert_non_null(root);
 
     sr_val_t *value;
 
     /* enum leaf*/
-#define XP_TEST_MODULE_ENUM "/test-module:main/enum"
     rc = rp_dt_get_value_xpath(ctx, root, XP_TEST_MODULE_ENUM, &value);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -400,7 +302,6 @@ void get_values_test_module_test(void **state){
     sr_free_val(value);
 
     /* binary leaf*/
-#define XP_TEST_MODULE_RAW "/test-module:main/raw"
     rc = rp_dt_get_value_xpath(ctx, root, XP_TEST_MODULE_RAW, &value);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -410,8 +311,6 @@ void get_values_test_module_test(void **state){
     sr_free_val(value);
 
     /*bits leaf*/
-
-#define XP_TEST_MODULE_BITS "/test-module:main/options"
     rc = rp_dt_get_value_xpath(ctx, root, XP_TEST_MODULE_BITS, &value);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -420,7 +319,6 @@ void get_values_test_module_test(void **state){
 
     sr_free_val(value);
 
-    sr_free_datatree(root);
     dm_session_stop(ctx, ses_ctx);
 }
 
@@ -428,10 +326,11 @@ void get_values_test_module_test(void **state){
 
 void get_values_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -441,6 +340,15 @@ void get_values_test(void **state){
 
     sr_val_t **values;
     size_t count;
+    #define XP_MODULE "/example-module:"
+    rc = rp_dt_get_values_xpath(ctx, root, XP_MODULE, &values, &count);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_int_equal(4, count); /*container + 3 leaf-list instances */
+    for (size_t i = 0; i < count; i++) {
+        puts(values[i]->xpath);
+        sr_free_val(values[i]);
+    }
+    free(values);
 
 #define XP_LEAF "/example-module:container/list[key1='key1'][key2='key2']/leaf"
     rc = rp_dt_get_values_xpath(ctx, root, XP_LEAF, &values, &count);
@@ -494,7 +402,7 @@ void get_values_test(void **state){
     }
     free(values);
 
-    sr_free_datatree(root);
+    lyd_free_withsiblings(root);
 
     dm_session_stop(ctx, ses_ctx);
 }
@@ -502,11 +410,12 @@ void get_values_test(void **state){
 
 void get_values_opts_test(void **state) {
     int rc = 0;
-    dm_ctx_t *ctx = *state;
-    dm_session_t *ses_ctx = NULL;
+    rp_ctx_t *ctx = *state;
+    rp_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
-    rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
+
+    test_rp_sesssion_create(ctx, SR_DS_STARTUP, &ses_ctx);
+    rc = dm_get_datatree(ctx->dm_ctx, ses_ctx->dm_session, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
 
     struct lyd_node *root = NULL;
@@ -525,7 +434,7 @@ void get_values_opts_test(void **state) {
     xp_loc_id_t *l;
     assert_int_equal(SR_ERR_OK, xp_char_to_loc_id(EX_CONT, &l));
     struct lyd_node **nodes = NULL;
-    rc = rp_dt_get_nodes_with_opts(ctx,ses_ctx, &get_items_ctx, root, l, true, 0, 3, &nodes, &count);
+    rc = rp_dt_get_nodes_with_opts(ctx->dm_ctx, ses_ctx->dm_session, &get_items_ctx, root, l, true, 0, 3, &nodes, &count);
     assert_int_equal(SR_ERR_OK, rc);
 
     free(nodes);
@@ -541,31 +450,35 @@ void get_values_opts_test(void **state) {
     sr_free_values_arr(values, count);
 
     rc = rp_dt_get_values_wrapper_with_opts(ctx, ses_ctx, &get_items_ctx, EX_CONT, true, 100, 1, &values, &count);
-    assert_int_equal(SR_ERR_OK, rc);
+    assert_int_equal(SR_ERR_NOT_FOUND, rc);
     assert_string_equal(EX_CONT, get_items_ctx.xpath);
+
+    rc = rp_dt_get_values_wrapper_with_opts(ctx, ses_ctx, &get_items_ctx, "/example-module:", true, 0, 10, &values, &count);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_string_equal("/example-module:", get_items_ctx.xpath);
     for (size_t i=0; i < count; i++){
         puts(values[i]->xpath);
     }
     sr_free_values_arr(values, count);
 
-//TODO test not existing nodes, offset and limit out of range
-
     free(get_items_ctx.xpath);
     rp_ns_clean(&get_items_ctx.stack);
-    sr_free_datatree(root);
-    dm_session_stop(ctx, ses_ctx);
+    lyd_free_withsiblings(root);
+
+    test_rp_session_cleanup(ctx, ses_ctx);
 }
 
 
 void get_values_with_augments_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
     struct lyd_node *root = NULL;
     size_t count = 0;
     sr_val_t **values = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
 
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
@@ -583,27 +496,30 @@ void get_values_with_augments_test(void **state){
     free(values);
 
 
-    sr_free_datatree(root);
+    lyd_free_withsiblings(root);
     dm_session_stop(ctx, ses_ctx);
 }
 
 void get_value_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
 
     /* Load from file */
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
     sr_val_t *value = NULL;
 
+    assert_int_equal(SR_ERR_INVAL_ARG, rp_dt_get_value_xpath(ctx, data_tree, "/example-module:", &value));
+
     /*leaf*/
     xp_loc_id_t *l;
 #define XPATH_FOR_VALUE "/example-module:container/list[key1='key1'][key2='key2']/leaf"
     assert_int_equal(SR_ERR_OK, xp_char_to_loc_id(XPATH_FOR_VALUE, &l));
-    assert_int_equal(SR_ERR_OK, rp_dt_get_value(ctx, data_tree, l, &value));
+    assert_int_equal(SR_ERR_OK, rp_dt_get_value(ctx, data_tree, l, false, &value));
 
     assert_int_equal(SR_STRING_T, value->type);
     assert_string_equal("Leaf value", value->data.string_val);
@@ -634,11 +550,12 @@ void get_value_test(void **state){
 void get_node_test_found(void **state)
 {
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
     struct lyd_node *node = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
 
     /* Load from file */
     rc = dm_get_datatree(ctx, ses_ctx ,"example-module", &data_tree);
@@ -672,7 +589,7 @@ void get_node_test_found(void **state)
 #define XPATH_LIST_WITHOUT_KEY "/example-module:container/list"
     /* key values must be specified for get_node*/
     rc = rp_dt_get_node_xpath(ctx, data_tree, XPATH_LIST_WITHOUT_KEY, &node);
-    assert_int_equal(SR_ERR_NOT_FOUND, rc);
+    assert_int_equal(SR_ERR_INVAL_ARG, rc);
 
     dm_session_stop(ctx, ses_ctx);
 
@@ -680,10 +597,11 @@ void get_node_test_found(void **state)
 
 void get_nodes_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
     assert_int_equal(SR_ERR_OK, rc);
 
@@ -702,7 +620,7 @@ void get_nodes_test(void **state){
 
     free(nodes);
 
-    sr_free_datatree(root);
+    lyd_free_withsiblings(root);
     dm_session_stop(ctx, ses_ctx);
 
 }
@@ -710,11 +628,12 @@ void get_nodes_test(void **state){
 void get_node_test_not_found(void **state)
 {
     int rc = 0;
-    dm_ctx_t *ctx = *state;
+    rp_ctx_t *rp_ctx = *state;
+    dm_ctx_t *ctx = rp_ctx->dm_ctx;
     dm_session_t *ses_ctx = NULL;
     struct lyd_node *data_tree = NULL;
     struct lyd_node *node = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    dm_session_start(ctx, NULL, SR_DS_STARTUP, &ses_ctx);
 
     /* Load from file */
     rc = dm_get_datatree(ctx, ses_ctx, "example-module", &data_tree);
@@ -747,14 +666,19 @@ void get_node_test_not_found(void **state)
 
 void get_value_wrapper_test(void **state){
     int rc = 0;
-    dm_ctx_t *ctx = *state;
-    dm_session_t *ses_ctx = NULL;
-    dm_session_start(ctx, &ses_ctx);
+    rp_ctx_t *ctx = *state;
+    rp_session_t *ses_ctx = NULL;
+    test_rp_sesssion_create(ctx, SR_DS_STARTUP, &ses_ctx);
 
     /* unknown model*/
     sr_val_t *value = NULL;
     rc = rp_dt_get_value_wrapper(ctx, ses_ctx, "/non-existing:abc", &value);
     assert_int_equal(SR_ERR_UNKNOWN_MODEL, rc);
+
+    /* whole model xpath*/
+    value = NULL;
+    rc = rp_dt_get_value_wrapper(ctx, ses_ctx, "/test-module:", &value);
+    assert_int_equal(SR_ERR_INVAL_ARG, rc);
 
     /* not existing data tree*/
     rc = rp_dt_get_value_wrapper(ctx, ses_ctx, "/small-module:item", &value);
@@ -764,7 +688,7 @@ void get_value_wrapper_test(void **state){
     rc = rp_dt_get_value_wrapper(ctx, ses_ctx, "/example-module:container/list[key1='abc'][key2='def']", &value);
     assert_int_equal(SR_ERR_NOT_FOUND, rc);
 
-    dm_session_stop(ctx, ses_ctx);
+    test_rp_session_cleanup(ctx, ses_ctx);
 }
 
 int main(){

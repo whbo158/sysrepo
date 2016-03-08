@@ -26,9 +26,11 @@
 #include <string.h>
 #include <assert.h>
 #include <time.h>
-#include <avl.h>
+#include <pwd.h>
+#include <sys/types.h>
 
 #include "sr_common.h"
+#include "access_control.h"
 #include "session_manager.h"
 
 #define SM_SESSION_ID_INVALID 0         /**< Invalid value of session id. */
@@ -41,13 +43,13 @@
 typedef struct sm_ctx_s {
     sm_cleanup_cb session_cleanup_cb;     /**< Callback called by session cleanup. */
     sm_cleanup_cb connection_cleanup_cb;  /**< Callback called by connection cleanup. */
-    avl_tree_t *session_id_avl;     /**< avl tree for fast session lookup by id. */
-    avl_tree_t *connection_fd_avl;  /**< avl tree for fast connection lookup by file descriptor. */
+    sr_btree_t *session_id_btree;         /**< binary tree for fast session lookup by id. */
+    sr_btree_t *connection_fd_btree;      /**< binary tree for fast connection lookup by file descriptor. */
 } sm_ctx_t;
 
 /**
  * @brief Compares two sessions by session ID
- * (used by lookups in session avl tree).
+ * (used by lookups in session binary tree).
  */
 static int
 sm_session_cmp_id(const void *a, const void *b)
@@ -68,7 +70,7 @@ sm_session_cmp_id(const void *a, const void *b)
 
 /**
  * @brief Compares two connections by associated file descriptors
- * (used by lookups in fd avl tree).
+ * (used by lookups in fd binary tree).
  */
 static int
 sm_connection_cmp_fd(const void *a, const void *b)
@@ -90,7 +92,7 @@ sm_connection_cmp_fd(const void *a, const void *b)
 /**
  * @brief Cleans up the session. Releases all resources held in session context
  * by Session Manager and Connection Manager (via provided callback).
- * @note Called automatically when a node from session_id avl tree is removed
+ * @note Called automatically when a node from session_id binary tree is removed
  * (which is also when the tree itself is being destroyed).
  */
 static void
@@ -98,8 +100,8 @@ sm_session_cleanup(void *session)
 {
     if (NULL != session) {
         sm_session_t *sm_session = (sm_session_t *)session;
-        free((void*)sm_session->real_user);
-        free((void*)sm_session->effective_user);
+        free((void*)sm_session->credentials.r_username);
+        free((void*)sm_session->credentials.e_username);
         /* cleanup Connection Manager-related data */
         if ((NULL != sm_session->sm_ctx) && (NULL != sm_session->sm_ctx->session_cleanup_cb)) {
             sm_session->sm_ctx->session_cleanup_cb(sm_session);
@@ -111,7 +113,7 @@ sm_session_cleanup(void *session)
 /**
  * @brief Cleans up connection list entry. Releases all resources held in connection
  * context by Session Manager and Connection Manager (via provided callback).
- * @note Called automatically when a node from fd avl tree is removed
+ * @note Called automatically when a node from fd binary tree is removed
  * (which is also when the tree itself is being destroyed).
  */
 static void
@@ -221,21 +223,19 @@ sm_init(sm_cleanup_cb session_cleanup_cb, sm_cleanup_cb connection_cleanup_cb, s
     ctx->session_cleanup_cb = session_cleanup_cb;
     ctx->connection_cleanup_cb = connection_cleanup_cb;
 
-    /* create avl tree for fast session lookup by id,
+    /* create binary tree for fast session lookup by id,
      * with automatic cleanup when the session is removed from tree */
-    ctx->session_id_avl = avl_alloc_tree(sm_session_cmp_id, sm_session_cleanup);
-    if (NULL == ctx->session_id_avl) {
-        SR_LOG_ERR_MSG("Cannot allocate avl tree for session IDs.");
-        rc = SR_ERR_NOMEM;
+    rc = sr_btree_init(sm_session_cmp_id, sm_session_cleanup, &ctx->session_id_btree);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate binary tree for session IDs.");
         goto cleanup;
     }
 
-    /* create avl tree for fast connection lookup by fd,
+    /* create binary tree for fast connection lookup by fd,
      * with automatic cleanup when the connection is removed from tree */
-    ctx->connection_fd_avl = avl_alloc_tree(sm_connection_cmp_fd, sm_connection_cleanup);
-    if (NULL == ctx->connection_fd_avl) {
-        SR_LOG_ERR_MSG("Cannot allocate avl tree for connection FDs.");
-        rc = SR_ERR_NOMEM;
+    rc = sr_btree_init(sm_connection_cmp_fd, sm_connection_cleanup, &ctx->connection_fd_btree);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate binary tree for connection FDs.");
         goto cleanup;
     }
 
@@ -257,11 +257,11 @@ sm_cleanup(sm_ctx_t *sm_ctx)
     SR_LOG_DBG("Session Manager cleanup requested, ctx=%p.", (void*)sm_ctx);
 
     if (NULL != sm_ctx) {
-        if (NULL != sm_ctx->session_id_avl) {
-            avl_free_tree(sm_ctx->session_id_avl);
+        if (NULL != sm_ctx->session_id_btree) {
+            sr_btree_cleanup(sm_ctx->session_id_btree);
         }
-        if (NULL != sm_ctx->connection_fd_avl) {
-            avl_free_tree(sm_ctx->connection_fd_avl);
+        if (NULL != sm_ctx->connection_fd_btree) {
+            sr_btree_cleanup(sm_ctx->connection_fd_btree);
         }
         free(sm_ctx);
     }
@@ -272,7 +272,6 @@ sm_connection_start(const sm_ctx_t *sm_ctx, const sm_connection_type_t type, con
         sm_connection_t **connection_p)
 {
     sm_connection_t *connection = NULL;
-    avl_node_t *node = NULL;
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG(sm_ctx);
@@ -287,7 +286,7 @@ sm_connection_start(const sm_ctx_t *sm_ctx, const sm_connection_type_t type, con
     connection->type = type;
     connection->fd = fd;
 
-    /* set peer's uid and gid */
+    /* set peer's effective uid and gid */
     rc = sr_get_peer_eid(fd, &connection->uid, &connection->gid);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Cannot retrieve uid and gid of the peer.");
@@ -295,10 +294,10 @@ sm_connection_start(const sm_ctx_t *sm_ctx, const sm_connection_type_t type, con
         return SR_ERR_INTERNAL;
     }
 
-    /* insert connection into avl tree for fast lookup by fd */
-    node = avl_insert(sm_ctx->connection_fd_avl, connection);
-    if (NULL == node) {
-        SR_LOG_ERR_MSG("Cannot insert new entry into fd avl tree (duplicate fd?).");
+    /* insert connection into binary tree for fast lookup by fd */
+    rc = sr_btree_insert(sm_ctx->connection_fd_btree, connection);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot insert new entry into fd binary tree (duplicate fd?).");
         free(connection);
         return SR_ERR_INTERNAL;
     }
@@ -327,17 +326,17 @@ sm_connection_stop(const sm_ctx_t *sm_ctx,  sm_connection_t *connection)
         tmp = tmp->next;
     }
 
-    avl_delete(sm_ctx->connection_fd_avl, connection); /* sm_connection_cleanup auto-invoked */
+    sr_btree_delete(sm_ctx->connection_fd_btree, connection); /* sm_connection_cleanup auto-invoked */
 
     return SR_ERR_OK;
 }
 
 int
 sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
-        const char *real_user, const char *effective_user, sm_session_t **session_p)
+        const char *effective_user, sm_session_t **session_p)
 {
     sm_session_t *session = NULL;
-    avl_node_t *node = NULL;
+    struct passwd *pws = NULL;
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG2(sm_ctx, session_p);
@@ -351,28 +350,46 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
     }
     session->sm_ctx = (sm_ctx_t*)sm_ctx;
 
-    /* duplicate and set user names */
-    session->real_user = strdup(real_user);
-    if (NULL == session->real_user) {
+    /* save real user credentials */
+    pws = getpwuid(connection->uid);
+    if (NULL == pws) {
+        SR_LOG_ERR("Cannot retrieve credentials of the real user: %s", strerror(errno));
+        rc = SR_ERR_INTERNAL;
+        goto cleanup;
+    }
+    session->credentials.r_username = strdup(pws->pw_name);
+    if (NULL == session->credentials.r_username) {
         SR_LOG_ERR_MSG("Cannot allocate memory for real user name.");
         rc = SR_ERR_NOMEM;
         goto cleanup;
     }
+    session->credentials.r_uid = connection->uid;
+    session->credentials.r_gid = connection->gid;
+
+    /* save effective user credentials */
     if (NULL != effective_user) {
-        session->effective_user = strdup(effective_user);
-        if (NULL == session->effective_user) {
+        errno = 0;
+        pws = getpwnam(effective_user);
+        if (NULL == pws) {
+            SR_LOG_ERR("Cannot retrieve credentials of the effective user (%s): Invalid username?", effective_user);
+            rc = SR_ERR_INVAL_ARG;
+            goto cleanup;
+        }
+        session->credentials.e_username = strdup(effective_user);
+        if (NULL == session->credentials.e_username) {
             SR_LOG_ERR_MSG("Cannot allocate memory for effective user name.");
             rc = SR_ERR_NOMEM;
             goto cleanup;
         }
+        session->credentials.e_uid = pws->pw_uid;
+        session->credentials.e_gid = pws->pw_gid;
     }
 
     /* generate unused random session_id */
     size_t attempts = 0;
     do {
         session->id = rand();
-        node = avl_search(sm_ctx->session_id_avl, session);
-        if (NULL != node) {
+        if (NULL != sr_btree_search(sm_ctx->session_id_btree, session)) {
             session->id = SM_SESSION_ID_INVALID;
         }
         if (++attempts > SM_SESSION_ID_MAX_ATTEMPTS) {
@@ -382,10 +399,10 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
         }
     } while (SM_SESSION_ID_INVALID == session->id);
 
-    /* insert into avl tree for fast lookup by id */
-    node = avl_insert(sm_ctx->session_id_avl, session);
-    if (NULL == node) {
-        SR_LOG_ERR_MSG("Cannot insert new entry into session avl tree (duplicate id?).");
+    /* insert into binary tree for fast lookup by id */
+    rc = sr_btree_insert(sm_ctx->session_id_btree, session);
+        if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot insert new entry into session binary tree (duplicate id?).");
         rc = SR_ERR_INTERNAL;
         goto cleanup;
     }
@@ -399,7 +416,7 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
     }
 
     SR_LOG_INF("New session created successfully, real user=%s, effective user=%s, "
-            "session id=%"PRIu32".", real_user, effective_user, session->id);
+            "session id=%"PRIu32".", session->credentials.r_username, session->credentials.e_username, session->id);
 
     *session_p = session;
     return rc;
@@ -423,7 +440,7 @@ sm_session_drop(const sm_ctx_t *sm_ctx, sm_session_t *session)
         SR_LOG_WRN("Cannot remove the session from connection (id=%"PRIu32").", session->id);
     }
 
-    avl_delete(sm_ctx->session_id_avl, session); /* sm_session_cleanup auto-invoked */
+    sr_btree_delete(sm_ctx->session_id_btree, session); /* sm_session_cleanup auto-invoked */
 
     return SR_ERR_OK;
 }
@@ -432,7 +449,6 @@ int
 sm_session_find_id(const sm_ctx_t *sm_ctx, uint32_t session_id, sm_session_t **session)
 {
     sm_session_t tmp = { 0, };
-    avl_node_t *node = NULL;
 
     CHECK_NULL_ARG2(sm_ctx, session);
 
@@ -442,22 +458,19 @@ sm_session_find_id(const sm_ctx_t *sm_ctx, uint32_t session_id, sm_session_t **s
     }
 
     tmp.id = session_id;
-    node = avl_search(sm_ctx->session_id_avl, &tmp);
+    *session = sr_btree_search(sm_ctx->session_id_btree, &tmp);
 
-    if (NULL == node) {
+    if (NULL == *session) {
         SR_LOG_WRN("Cannot find the session with id=%"PRIu32".", session_id);
         return SR_ERR_NOT_FOUND;
-    } else {
-        *session = node->item;
-        return SR_ERR_OK;
     }
+    return SR_ERR_OK;
 }
 
 int
 sm_connection_find_fd(const sm_ctx_t *sm_ctx, const int fd, sm_connection_t **connection)
 {
     sm_connection_t tmp_conn = { 0, };
-    avl_node_t *node = NULL;
 
     CHECK_NULL_ARG2(sm_ctx, connection);
 
@@ -467,30 +480,25 @@ sm_connection_find_fd(const sm_ctx_t *sm_ctx, const int fd, sm_connection_t **co
     }
 
     tmp_conn.fd = fd;
-    node = avl_search(sm_ctx->connection_fd_avl, &tmp_conn);
+    *connection = sr_btree_search(sm_ctx->connection_fd_btree, &tmp_conn);
 
-    if (NULL == node) {
+    if (NULL == *connection) {
         SR_LOG_WRN("Cannot find the connection with fd=%d.", fd);
         return SR_ERR_NOT_FOUND;
-    } else {
-        *connection = node->item;
-        return SR_ERR_OK;
     }
+    return SR_ERR_OK;
 }
 
 int
 sm_session_get_index(const sm_ctx_t *sm_ctx, uint32_t index, sm_session_t **session)
 {
-    avl_node_t *node = NULL;
-
     CHECK_NULL_ARG2(sm_ctx, session);
 
-    node = avl_at(sm_ctx->session_id_avl, index);
+    *session = sr_btree_get_at(sm_ctx->session_id_btree, index);
 
-    if (NULL == node) {
+    if (NULL == *session) {
         return SR_ERR_NOT_FOUND;
-    } else {
-        *session = node->item;
-        return SR_ERR_OK;
     }
+
+    return SR_ERR_OK;
 }

@@ -1,7 +1,7 @@
 /**
- * @file dm_location.h
+ * @file rp_dt_context_helper.h
  * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
- * @brief 
+ * @brief RP datatree context helper functions API.
  *
  * @copyright
  * Copyright 2016 Cisco Systems, Inc.
@@ -19,11 +19,27 @@
  * limitations under the License.
  */
 
+#ifndef RP_DT_CONTEXT_HELPER_H_
+#define RP_DT_CONTEXT_HELPER_H_
 
-#ifndef SRC_DM_LOCATION_H_IN_
-#define SRC_DM_LOCATION_H_IN_
+/**
+ * @brief Creates testing RP context.
+ */
+void test_rp_ctx_create(rp_ctx_t **rp_ctx_p);
 
-#define DM_SCHEMA_SEARCH_DIR "@SCHEMA_SEARCH_DIR@"
-#define DM_DATA_SEARCH_DIR "@DATA_SEARCH_DIR@"
+/**
+ * @brief Cleans up testing RP context.
+ */
+void test_rp_ctx_cleanup(rp_ctx_t *ctx);
 
-#endif /* SRC_DM_LOCATION_H_IN_ */
+/**
+ * @brief Creates testing RP session.
+ */
+void test_rp_sesssion_create(rp_ctx_t *rp_ctx, sr_datastore_t datastore, rp_session_t **rp_session_p);
+
+/**
+ * @brief Cleans up testing RP context.
+ */
+void test_rp_session_cleanup(rp_ctx_t *ctx, rp_session_t *session);
+
+#endif /* RP_DT_CONTEXT_HELPER_H_ */

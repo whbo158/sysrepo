@@ -3,8 +3,8 @@
 build/
 doc/
 tests/data/test_data.h
-src/dm_location.h
-src/*.pb-c.*
+src/common/sr_constants.h
+src/common/*.pb-c.*
 .idea/
 nbproject/
 CMakeCache.txt

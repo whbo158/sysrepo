@@ -33,8 +33,8 @@ static int
 setup(void **state) {
     sm_ctx_t *ctx = NULL;
 
-    sr_logger_init(NULL);
-    sr_logger_set_level(SR_LL_ERR, SR_LL_ERR); /* print only errors. */
+    sr_logger_init("sm_test");
+    sr_log_stderr(SR_LL_DBG);
 
     sm_init(NULL, NULL, &ctx);
     *state = ctx;
@@ -57,6 +57,7 @@ teardown(void **state) {
  */
 static void
 session_create_drop(void **state) {
+#ifdef __linux__
     sm_ctx_t *ctx = *state;
     sm_connection_t *conn = NULL;
     sm_session_t *sess = NULL;
@@ -72,7 +73,7 @@ session_create_drop(void **state) {
     assert_non_null(conn);
 
     /* create one session */
-    rc = sm_session_create(ctx, conn, "root", NULL, &sess);
+    rc = sm_session_create(ctx, conn, NULL, &sess);
     assert_int_equal(rc, SR_ERR_OK);
     assert_non_null(sess);
 
@@ -83,6 +84,7 @@ session_create_drop(void **state) {
     /* stop a connection */
     rc = sm_connection_stop(ctx, conn);
     assert_int_equal(rc, SR_ERR_OK);
+#endif
 }
 
 /**
@@ -91,6 +93,7 @@ session_create_drop(void **state) {
  */
 static void
 session_find_id(void **state) {
+#ifdef __linux__
     sm_ctx_t *ctx = *state;
     sm_connection_t *conn = NULL;
     sm_session_t *sess = NULL;
@@ -108,7 +111,7 @@ session_find_id(void **state) {
     /* create 100 sessions */
     size_t i = 0;
     for (i = 0; i < 100; i ++) {
-        rc = sm_session_create(ctx, conn, "root", "bob", &sess);
+        rc = sm_session_create(ctx, conn, NULL, &sess);
         assert_int_equal(rc, SR_ERR_OK);
         assert_non_null(sess);
     }
@@ -135,6 +138,7 @@ session_find_id(void **state) {
     /* stop the connection */
     rc = sm_connection_stop(ctx, conn);
     assert_int_equal(rc, SR_ERR_OK);
+#endif
 }
 
 /**
@@ -143,6 +147,7 @@ session_find_id(void **state) {
  */
 static void
 session_find_fd(void **state) {
+#ifdef __linux__
     sm_ctx_t *ctx = *state;
     sm_connection_t *conn = NULL;
     sm_session_t *sess = NULL;
@@ -160,7 +165,7 @@ session_find_fd(void **state) {
             assert_int_equal(rc, SR_ERR_OK);
             assert_non_null(conn);
         }
-        rc = sm_session_create(ctx, conn, "root", "bob", &sess);
+        rc = sm_session_create(ctx, conn, NULL, &sess);
         assert_int_equal(rc, SR_ERR_OK);
         assert_non_null(sess);
     }
@@ -208,6 +213,7 @@ session_find_fd(void **state) {
         cnt++;
     }
     assert_int_equal(cnt, 7);
+#endif
 }
 
 int

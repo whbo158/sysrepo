@@ -55,11 +55,11 @@ void check_nodes(void **state){
     xp_loc_id_t *l = (xp_loc_id_t *) *state;
     assert_true(XP_GET_NODE_COUNT(l)  == 3);
 
-    assert_true(XP_CMP_NODE(l,0,"container"));
-    assert_true(XP_CMP_NODE(l,1,"list"));
-    assert_true(XP_CMP_NODE(l,2,"leaf"));
+    assert_true(XP_EQ_NODE(l,0,"container"));
+    assert_true(XP_EQ_NODE(l,1,"list"));
+    assert_true(XP_EQ_NODE(l,2,"leaf"));
 
-    assert_false(XP_CMP_NODE(l,0,"asfadsf"));
+    assert_false(XP_EQ_NODE(l,0,"asfadsf"));
 
 }
 
@@ -68,8 +68,10 @@ void check_ns(void **state){
 
     assert_true(XP_HAS_NODE_NS(l,0));
     assert_int_equal(1,XP_GET_NODE_NS_INDEX(l,0));
-    assert_true(XP_CMP_NODE_NS(l,0,"model"));
-    assert_false(XP_CMP_NODE_NS(l,0,"asfaafafa"));
+    assert_true(XP_EQ_NODE_NS(l,0,"model"));
+    assert_false(XP_EQ_NODE_NS(l,0,"asfaafafa"));
+    assert_true(XP_CMP_NODE_NS(l,0,"model") == 0);
+    assert_false(XP_CMP_NODE_NS(l,0,"asfaafafa") == 0);
     assert_false(XP_HAS_NODE_NS(l,1));
 
 }
@@ -81,8 +83,8 @@ void check_keys(void **state){
 
     assert_true(XP_HAS_KEY_NAMES(l,1));
 
-    assert_true(XP_CMP_KEY_NAME(l,1,0,"k1"));
-    assert_true(XP_CMP_KEY_VALUE(l,1,0,"key1"));
+    assert_true(XP_EQ_KEY_NAME(l,1,0,"k1"));
+    assert_true(XP_EQ_KEY_VALUE(l,1,0,"key1"));
 
     char *keyVal = XP_CPY_TOKEN(l,XP_GET_KEY_VALUE_INDEX(l,1,0));
     char *keyName = XP_CPY_TOKEN(l,XP_GET_KEY_NAME_INDEX(l,1,0));
@@ -93,9 +95,18 @@ void check_keys(void **state){
     free(keyName);
     free(keyVal);
 
-    assert_true(XP_CMP_KEY_NAME(l,1,1,"k2"));
-    assert_true(XP_CMP_KEY_VALUE(l,1,1,"key2"));
+    assert_true(XP_EQ_KEY_NAME(l,1,1,"k2"));
+    assert_true(XP_EQ_KEY_VALUE(l,1,1,"key2"));
 
+}
+
+void check_module_xpath(void **state){
+    sr_log_stderr(SR_LL_DBG);
+    xp_loc_id_t *xp = NULL;
+
+    assert_int_equal(0,xp_char_to_loc_id("/module-name:", &xp));
+    assert_true(XP_IS_MODULE_XPATH(xp));
+    xp_free_loc_id(xp);
 }
 
 void test1(void **state){
@@ -118,8 +129,11 @@ void test1(void **state){
 void check_parsing(void **state){
    xp_loc_id_t *l;
    assert_int_not_equal(0,xp_char_to_loc_id("abc", &l));
+   /*without namespace*/
+   assert_int_not_equal(0,xp_char_to_loc_id("/abc", &l));
    /* path must not end with slash */
    assert_int_not_equal(0,xp_char_to_loc_id("/model:leaf/", &l));
+   assert_int_not_equal(0,xp_char_to_loc_id("/model:container/bad:", &l));
 
    assert_int_not_equal(0,xp_char_to_loc_id("//container", &l));
    assert_int_not_equal(0,xp_char_to_loc_id("/ns:cont/list[", &l));
@@ -149,6 +163,19 @@ void check_parsing(void **state){
 
 }
 
+void
+cpy_up_to_node_test(void **state)
+{
+    xp_loc_id_t *l = NULL;
+    assert_int_equal(0, xp_char_to_loc_id("/module:container/list[key1='a'][key2='b']/leaf",&l));
+
+    char *up_to_cont = XP_CPY_UP_TO_NODE(l, 0);
+    assert_non_null(up_to_cont);
+    assert_string_equal(up_to_cont,"/module:container");
+    free(up_to_cont);
+    xp_free_loc_id(l);
+}
+
 int main(){
 
     const struct CMUnitTest tests[] = {
@@ -158,6 +185,8 @@ int main(){
             cmocka_unit_test_setup_teardown(check_ns, setup, teardown),
             cmocka_unit_test_setup_teardown(check_keys, setup, teardown),
             cmocka_unit_test(check_parsing),
+            cmocka_unit_test(check_module_xpath),
+            cmocka_unit_test(cpy_up_to_node_test),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

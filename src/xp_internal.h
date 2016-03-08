@@ -42,6 +42,12 @@ typedef enum xp_token_e{
 
 }xp_token_t;
 
+/**
+ * @brief Number of token in xpath for module T_SLASH, T_NS, T_COLON, T_ZERO
+ * e.g: "/module:"
+ */
+#define XP_MODULE_XPATH_TOKEN_COUNT 4
+
 /*
  * -start returns pointer to XPATH
  * -token return value of token
@@ -59,11 +65,18 @@ typedef enum xp_token_e{
 /**@brief Returns the length of the ORD-th token. ORD must be in a valid range. */
 #define XP_GET_TOKEN_LENGTH(L,ORD) ((L)->positions[ORD+1] - (L)->positions[ORD])
 
+/**@brief Returns the length up to the ORD-th token. ORD must be in a valid range. */
+#define XP_GET_UP_TO_TOKEN_LENGTH(L,ORD) ((L)->positions[ORD+1] - (L)->positions[0])
+
+
 /**@brief Returns the copied content of the ORD-th token . ORD must be in a valid range. */
 #define XP_CPY_TOKEN(L,ORD) (strndup(XP_GET_TOKEN_START(L,ORD),XP_GET_TOKEN_LENGTH(L,ORD)))
 
-/**@brief String compare of the ORD-th token with VAL */
-#define XP_CMP_TOKEN_STR(L,ORD,VAL) (strncmp(XP_GET_TOKEN_START(L,ORD),(VAL), XP_GET_TOKEN_LENGTH(L,ORD)) ==0)
+/**@brief String compare of the ORD-th token with VAL, returns true by match, false otherwise */
+#define XP_EQ_TOKEN_STR(L,ORD,VAL) (strncmp(XP_GET_TOKEN_START(L,ORD),(VAL), XP_GET_TOKEN_LENGTH(L,ORD)) == 0)
+
+/**@brief String compare of the ORD-th token with VAL, returns the return value of strncmp */
+#define XP_CMP_TOKEN_STR(L,ORD,VAL) (strncmp(XP_GET_TOKEN_START(L,ORD),(VAL), XP_GET_TOKEN_LENGTH(L,ORD)))
 
 #define XP_GET_NODE_NS_INDEX(L,NODE) (XP_GET_NODE_TOKEN(L,NODE)-2)
 

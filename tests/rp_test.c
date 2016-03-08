@@ -27,6 +27,7 @@
 #include <cmocka.h>
 
 #include "sr_common.h"
+#include "access_control.h"
 #include "request_processor.h"
 
 static int
@@ -34,6 +35,9 @@ rp_setup(void **state)
 {
     rp_ctx_t *rp_ctx = NULL;
     int rc = 0;
+
+    sr_logger_init("rp_test");
+    sr_log_stderr(SR_LL_DBG);
 
     rc = rp_init(NULL, &rp_ctx);
     assert_int_equal(rc, SR_ERR_OK);
@@ -50,6 +54,7 @@ rp_teardown(void **state)
     assert_non_null(rp_ctx);
 
     rp_cleanup(rp_ctx);
+    sr_logger_cleanup();
 
     return 0;
 }
@@ -63,12 +68,16 @@ rp_session_test(void **state)
     int rc = 0, i = 0;
     rp_session_t *session = NULL;
 
+    ac_ucred_t credentials = { 0 };
+    credentials.e_uid = getuid();
+    credentials.e_gid = getgid();
+
     rp_ctx_t *rp_ctx = *state;
     assert_non_null(rp_ctx);
 
     for (i = 0; i < 100; i++) {
         /* create a session */
-        rc = rp_session_start(rp_ctx, "root", "alice", 123456, SR_DS_CANDIDATE, &session);
+        rc = rp_session_start(rp_ctx, 123456, &credentials, SR_DS_STARTUP, &session);
         assert_int_equal(rc, SR_ERR_OK);
         assert_non_null(session);
 
@@ -91,6 +100,10 @@ rp_msg_neg_test(void **state)
     rp_ctx_t *rp_ctx = *state;
     assert_non_null(rp_ctx);
 
+    ac_ucred_t credentials = { 0 };
+    credentials.e_uid = getuid();
+    credentials.e_gid = getgid();
+
     /* generate some request */
     rc = sr_pb_req_alloc(SR__OPERATION__GET_ITEM, 123456, &msg);
     assert_int_equal(rc, SR_ERR_OK);
@@ -101,7 +114,7 @@ rp_msg_neg_test(void **state)
     assert_int_equal(rc, SR_ERR_INVAL_ARG);
 
     /* create a session */
-    rc = rp_session_start(rp_ctx, "root", "alice", 123456, SR_DS_CANDIDATE, &session);
+    rc = rp_session_start(rp_ctx, 123456, &credentials, SR_DS_STARTUP, &session);
     assert_int_equal(rc, SR_ERR_OK);
     assert_non_null(session);
 
@@ -110,18 +123,18 @@ rp_msg_neg_test(void **state)
     assert_int_equal(rc, SR_ERR_OK);
     assert_non_null(msg);
 
-    /* process the message and expect UNSUPPORTED error */
+    /* process the message */
     rc = rp_msg_process(rp_ctx, session, msg);
-    assert_int_equal(rc, SR_ERR_UNSUPPORTED);
+    assert_int_equal(rc, SR_ERR_OK);
 
     /* RP does not implement session start response */
     rc = sr_pb_resp_alloc(SR__OPERATION__SESSION_START, 123456, &msg);
     assert_int_equal(rc, SR_ERR_OK);
     assert_non_null(msg);
 
-    /* process the message and expect UNSUPPORTED error */
+    /* process the message */
     rc = rp_msg_process(rp_ctx, session, msg);
-    assert_int_equal(rc, SR_ERR_UNSUPPORTED);
+    assert_int_equal(rc, SR_ERR_OK);
 
     /* stop the session */
     rc = rp_session_stop(rp_ctx, session);

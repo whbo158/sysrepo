@@ -1,0 +1,73 @@
+/**
+ * @file sr_constants.h
+ * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
+ * @brief Common sysrepo constants.
+ *
+ * @copyright
+ * Copyright 2016 Cisco Systems, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+#ifndef SRC_SR_CONSTANTS_H_IN_
+#define SRC_SR_CONSTANTS_H_IN_
+
+/** Current version of sysrepo. */
+#define SR_VERSION "@SYSREPO_VERSION@"
+
+/* Portability feature-check macros. */
+#cmakedefine HAVE_PTHREAD_RWLOCKATTR_SETKIND_NP
+#cmakedefine HAVE_GETPEEREID
+#cmakedefine HAVE_GETPEERUCRED
+#cmakedefine HAVE_UCRED_H
+#cmakedefine HAVE_SETFSUID
+#cmakedefine HAVE_STAT_ST_MTIM
+
+/** Use libavl (if defined) or libredblack (if not defined) for binary tree manipulations. */
+#cmakedefine USE_AVL_LIB
+
+/** Path to the directory with schemas. */
+#define SR_SCHEMA_SEARCH_DIR "@SCHEMA_SEARCH_DIR@"
+
+/** Path to the directory with data files. */
+#define SR_DATA_SEARCH_DIR "@DATA_SEARCH_DIR@"
+
+/** File extension of data files for startup datastore */
+#define SR_STARTUP_FILE_EXT ".startup"
+
+/** File extension of data files for running datastore */
+#define SR_RUNNING_FILE_EXT ".running"
+
+/** File extension of YANG schema files */
+#define SR_SCHEMA_YANG_FILE_EXT ".yang"
+
+/** File extension of YIN schema files */
+#define SR_SCHEMA_YIN_FILE_EXT ".yin"
+
+/** Sysrepo daemon working directory. */
+#define SR_DEAMON_WORK_DIR "/"
+
+/** Sysrepo daemon PID file. */
+#define SR_DAEMON_PID_FILE "/tmp/sysrepo.pid"
+
+/** Sysrepo daemon server socket. */
+#define SR_DAEMON_SOCKET "/tmp/sysrepod.sock"
+
+/** Maximum size of a GPB message. */
+#define SR_MAX_MSG_SIZE ((SIZE_MAX < UINT32_MAX) ? SIZE_MAX : UINT32_MAX)
+
+/** Size of the preamble sent before each sysrepo GPB message. */
+#define SR_MSG_PREAM_SIZE sizeof(uint32_t)
+
+#endif /* SRC_SR_CONSTANTS_H_IN_ */

@@ -18,6 +18,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include "sysrepo.h"
@@ -30,17 +31,17 @@ main(int argc, char **argv)
     sr_val_t *value = NULL;
     int rc = SR_ERR_OK;
     
-    /* turn on debug logging to stderr - to see what's happening behind :) */
-    sr_logger_set_level(SR_LL_DBG, SR_LL_INF);
+    /* turn on debug logging to stderr - to see what's happening behind the scenes */
+    sr_log_stderr(SR_LL_DBG);
 
     /* connect to sysrepo */
-    rc = sr_connect("app1", true, &conn);
+    rc = sr_connect("app1", SR_CONN_DEFAULT, &conn);
     if (SR_ERR_OK != rc) {
         goto cleanup;
     }
 
     /* start session */
-    rc = sr_session_start(conn, NULL, SR_DS_CANDIDATE, &sess);
+    rc = sr_session_start(conn, SR_DS_STARTUP, &sess);
     if (SR_ERR_OK != rc) {
         goto cleanup;
     }

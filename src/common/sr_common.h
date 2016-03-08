@@ -36,14 +36,11 @@
 #include <libyang/libyang.h>
 
 #include "sysrepo.h"
+#include "sr_constants.h"
 #include "sr_logger.h"
+#include "sr_btree.h"
+
 #include "sysrepo.pb-c.h"
-
-/** Maximum size of a GPB message. */
-#define SR_MAX_MSG_SIZE ((SIZE_MAX < UINT32_MAX) ? SIZE_MAX : UINT32_MAX)
-
-/** Size of the preamble sent before each sysrepo GPB message. */
-#define SR_MSG_PREAM_SIZE sizeof(uint32_t)
 
 #define CHECK_NULL_ARG__INTERNAL(ARG) \
     if (NULL == ARG) { \
@@ -169,6 +166,15 @@
     } while(0)
 
 /**
+ * @brief Returns string with name of the provided operation.
+ *
+ * @param[in] operation Sysrepo operation in GPB enum value format.
+ *
+ * @return Name of the operation (statically allocated, do not free).
+ */
+const char *sr_operation_name(Sr__Operation operation);
+
+/**
  * @brief FIFO circular buffer queue context.
  */
 typedef struct sr_cbuff_s sr_cbuff_t;
@@ -218,6 +224,15 @@ int sr_cbuff_enqueue(sr_cbuff_t *buffer, void *item);
 bool sr_cbuff_dequeue(sr_cbuff_t *buffer, void *item);
 
 /**
+ * @brief Return number of elements currently stored in the queue.
+ *
+ * @param[in] buffer Circular buffer queue context.
+ *
+ * @return Number of elements currently stored in the queue.
+ */
+size_t sr_cbuff_items_in_queue(sr_cbuff_t *buffer);
+
+/**
  * @brief Compares the suffix of the string, if it matches 0 is returned
  * @param [in] str
  * @param [in] suffix
@@ -242,11 +257,62 @@ int sr_str_join(const char *str1, const char *str2, char **result);
  */
 int sr_save_data_tree_file(const char *file_name, const struct lyd_node *data_tree);
 
-/**
- * @brief Frees datatree pointed by root including its siblings.
+/*
+ * @brief Copies the datatree pointed by root including its siblings.
  * @param [in] root
+ * @return duplicated datatree or NULL in case of error
  */
-void sr_free_datatree(struct lyd_node *root);
+struct lyd_node* sr_dup_datatree(struct lyd_node *root);
+
+/* forward declaration */
+typedef struct dm_data_info_s dm_data_info_t;
+
+/**
+ * lyd_unlink wrapper handles the unlink of the root_node
+ * @param data_info
+ * @param node - must be stored under provided data_info
+ * @return err_code
+ */
+int sr_lyd_unlink(dm_data_info_t *data_info, struct lyd_node *node);
+
+/**
+ * lyd_new wrapper handle the creation of the container or list
+ * @param data_info
+ * @param parent
+ * @param module
+ * @param node_name
+ * @return created node or NULL in case of error
+ */
+struct lyd_node *sr_lyd_new(dm_data_info_t *data_info, struct lyd_node *parent, const struct lys_module *module, const char *node_name);
+
+/**
+ * lyd_new wrapper handle the creation of the leaf or leaflist
+ * @param data_info
+ * @param parent
+ * @param module
+ * @param node_name
+ * @param value
+ * @return created node or NULL in case of error
+ */
+struct lyd_node *sr_lyd_new_leaf(dm_data_info_t *data_info, struct lyd_node *parent, const struct lys_module *module, const char *node_name, const char *value);
+
+/**
+ * @brief Insert node after sibling and fixes the pointer in dm_data_info if needed.
+ * @param [in] data_info
+ * @param [in] sibling
+ * @param [in] node
+ * @return 0 on success
+ */
+int sr_lyd_insert_after(dm_data_info_t *data_info, struct lyd_node *sibling, struct lyd_node *node);
+
+/**
+ * @brief Insert node before sibling and fixes the pointer in dm_data_info if needed.
+ * @param [in] data_info
+ * @param [in] sibling
+ * @param [in] node
+ * @return 0 on success
+ */
+int sr_lyd_insert_before(dm_data_info_t *data_info, struct lyd_node *sibling, struct lyd_node *node);
 
 /**
  * @brief Converts libyang enum of YANG built-in types to sysrepo representation
@@ -306,8 +372,8 @@ int sr_pb_resp_alloc(const Sr__Operation operation, const uint32_t session_id, S
 int sr_pb_msg_validate(const Sr__Msg *msg, const Sr__Msg__MsgType type, const Sr__Operation operation);
 
 /**
- * @brief Portable way to retrieve effective user ID and group ID of the
- * other end of a unix-domain socket.
+ * @brief Portable way to retrieve effective user ID and effective group ID of
+ * the other end of a unix-domain socket.
  *
  * @param[in] fd File descriptor of a socket.
  * @param[out] uid User ID of the other end.
@@ -381,6 +447,22 @@ Sr__DataStore sr_datastore_sr_to_gpb(const sr_datastore_t sr_ds);
 sr_datastore_t sr_datastore_gpb_to_sr(Sr__DataStore gpb_ds);
 
 /**
+ * @brief Converts sysrepo move direction to GPB move direction.
+ *
+ * @param[in] sr_direction Sysrepo move direction.
+ * @return GPB move direction.
+ */
+Sr__MoveItemReq__MoveDirection sr_move_direction_sr_to_gpb(sr_move_direction_t sr_direction);
+
+/**
+ * @brief Converts GPB move direction to sysrepo move direction.
+ *
+ * @param[in] gpb_direction GPB move direction.
+ * @return Sysrepo move direction.
+ */
+sr_move_direction_t sr_move_direction_gpb_to_sr(Sr__MoveItemReq__MoveDirection gpb_direction);
+
+/**
  * @brief Converts array of sr_schema_t to an array of pointers to GPB schemas.
  *
  * @param [in] sr_schemas Array of sr_schema_t.
@@ -399,11 +481,117 @@ int sr_schemas_sr_to_gpb(const sr_schema_t *sr_schemas, const size_t schema_cnt,
  * @param [in] gpb_schemas Array of pointers to GPB schemas.
  * @param [in] schema_cnt Number of schemas in the array.
  * @param [out] sr_schemas Array of sr_schema_t (allocated by the function,
- * should be freed with ::sr_free_schemas_t).
+ * should be freed with ::sr_free_schemas).
  *
  * @return Error code (SR_ERR_OK on success).
  */
 int sr_schemas_gpb_to_sr(const Sr__Schema **gpb_schemas, const size_t schema_cnt, sr_schema_t **sr_schemas);
+
+/**
+ * @brief Converts sr_val_t to string representation, used in set item
+ * @param [in] value
+ * @param [in] schema_node
+ * @param [out] out
+ * @return
+ */
+int sr_val_to_str(const sr_val_t *value, struct lys_node *schema_node, char **out);
+
+/**
+ * @brief Fills detailed error information into a GPB error message.
+ *
+ * @param[in] error_message Error message (can be NULL). String will be duplicated.
+ * @param[in] error_path XPath to node where error occurred (can be NULL). String will be duplicated.
+ * @param[in,out] gpb_error GPB message where the error information should be filled in.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_gpb_fill_error(const char *error_message, const char *error_path, Sr__Error **gpb_error);
+
+/**
+ * @brief Fills detailed error information into an array of pointers to GPB error messages.
+ *
+ * @param[in] sr_errors Array of detailed error information.
+ * @param[in] sr_error_cnt Number of errors in the sr_errors array.
+ * @param[out] gpb_errors Array of pointers to GPB error messages (will be allocated).
+ * @param[out] gpb_error_cnt Number of errors set to gpb_errors array.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_gpb_fill_errors(sr_error_info_t *sr_errors, size_t sr_error_cnt, Sr__Error ***gpb_errors, size_t *gpb_error_cnt);
+
+/**
+ * @brief Frees an array of detailed error information.
+ *
+ * @param[in] sr_errors Array of detailed error information.
+ * @param[in] sr_error_cnt Number of errors in the sr_errors array.
+ */
+void sr_free_errors(sr_error_info_t *sr_errors, size_t sr_error_cnt);
+
+/**
+ * @brief Creates the data file name corresponding to the module_name (schema).
+ *
+ * Function does not check if the schema name is valid. The file name is
+ * allocated on heap and needs to be freed by caller.
+ *
+ * @param[in] data_search_dir Path to the directory with data files.
+ * @param[in] module_name Name of the module.
+ * @param[in] ds Datastore that needs to be accessed.
+ * @param[out] file_name Allocated file path to the data file.
+ *
+ * @return err_code (SR_ERR_OK on success, SR_ERR_NOMEM if memory allocation failed).
+ */
+int sr_get_data_file_name(const char *data_search_dir, const char *module_name, const sr_datastore_t ds, char **file_name);
+
+/**
+ * @brief Creates the schema file name corresponding to the module_name (schema).
+ *
+ * Function does not check if the schema name is valid. The file name is
+ * allocated on heap and needs to be freed by caller.
+ *
+ * @param [in] schema_search_dir Path to the directory with schema files.
+ * @param [in] module_name Name of the module.
+ * @param [in] rev_date if set '@' rev_date is added to the filename
+ * @param [in] yang_format flag whether yang or yin filename should be created
+ * @param [out] file_name Allocated file path to the schema file.
+ *
+ * @return err_code (SR_ERR_OK on success, SR_ERR_NOMEM if memory allocation failed).
+ */
+int sr_get_schema_file_name(const char *schema_search_dir, const char *module_name, const char *rev_date, bool yang_format, char **file_name);
+
+/**
+ * @brief Frees the content of sr_schema_t structure
+ * @param [in] schema
+ */
+void sr_free_schema(sr_schema_t *schema);
+
+/**
+ * @brief Sets advisory inter-process file lock.
+ *
+ * Call close() or ::sr_unlock_fd to unlock an previously acquired lock.
+ *
+ * @note Multiple locks within the same process are allowed and considered as
+ * re-initialization of the previous lock (won't fail nor block).
+ *
+ * @param[in] fd Descriptor of the file to be locked.
+ * @param[in] write TRUE if you are requesting a lock for writing to the file,
+ * FALSE if you are requesting a lock just for reading.
+ * @param[in] TRUE If you want this function to block until lock is acquired,
+ * FALSE if you want this function to return an error if the lock cannot be acquired.
+ *
+ * @return err_code (SR_ERR_OK on success, SR_ERR_LOCKED if wait was set to
+ * false and the lock cannot be acquired).
+ */
+int sr_lock_fd(int fd, bool write, bool wait);
+
+/**
+ * @brief Removes advisory inter-process file lock previously acquired by
+ * ::sr_lock_fd.
+ *
+ * @param[in] fd Descriptor of the file to be unlocked.
+ *
+ * @return err_code (SR_ERR_OK on success).
+ */
+int sr_unlock_fd(int fd);
 
 /**@} common */
 

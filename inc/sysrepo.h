@@ -57,7 +57,7 @@
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// Typedefs and Common API
+// Common typedefs and API
 ////////////////////////////////////////////////////////////////////////////////
 
 /**
@@ -80,11 +80,11 @@ typedef enum sr_type_e {
     SR_LIST_T,                 /**< List instance. ([RFC 6020 sec 7.8](http://tools.ietf.org/html/rfc6020#section-7.8)) */
     SR_CONTAINER_T,            /**< Non-presence container. ([RFC 6020 sec 7.5](http://tools.ietf.org/html/rfc6020#section-7.5)) */
     SR_CONTAINER_PRESENCE_T,   /**< Presence container. ([RFC 6020 sec 7.5.1](http://tools.ietf.org/html/rfc6020#section-7.5.1)) */
-    SR_LEAF_EMPTY_T,           /**< A leaf that does not have any value ([RFC 6020 sec 9.11](http://tools.ietf.org/html/rfc6020#section-9.11)) */
+    SR_LEAF_EMPTY_T,           /**< A leaf that does not hold any value ([RFC 6020 sec 9.11](http://tools.ietf.org/html/rfc6020#section-9.11)) */
     SR_UNION_T,                /**< Choice of member types ([RFC 6020 sec 9.12](http://tools.ietf.org/html/rfc6020#section-9.12)) */
 
     /* types containing some data */
-    SR_BINARY_T,       /**< Any binary data ([RFC 6020 sec 9.8](http://tools.ietf.org/html/rfc6020#section-9.8)) */
+    SR_BINARY_T,       /**< Base64-encoded binary data ([RFC 6020 sec 9.8](http://tools.ietf.org/html/rfc6020#section-9.8)) */
     SR_BITS_T,         /**< A set of bits or flags ([RFC 6020 sec 9.7](http://tools.ietf.org/html/rfc6020#section-9.7)) */
     SR_BOOL_T,         /**< A boolean value ([RFC 6020 sec 9.5](http://tools.ietf.org/html/rfc6020#section-9.5)) */
     SR_DECIMAL64_T,    /**< 64-bit signed decimal number ([RFC 6020 sec 9.3](http://tools.ietf.org/html/rfc6020#section-9.3)) */
@@ -108,8 +108,9 @@ typedef enum sr_type_e {
  */
 typedef struct sr_val_s {
     /**
-     * XPath instance-identifier of an item in JSON format, as defined at
-     * https://tools.ietf.org/html/draft-ietf-netmod-yang-json-02#section-6.11
+     * XPath identifier of the data element, as defined in
+     * @ref xp_page "XPath Addressing" documentation or at
+     * https://tools.ietf.org/html/draft-ietf-netmod-yang-json#section-6.11
      */
     char *xpath;
 
@@ -118,10 +119,10 @@ typedef struct sr_val_s {
 
     /** Data of an element (if applicable), properly set according to the type. */
     union {
-        char *binary_val;       /**< Any binary data ([RFC 6020 sec 9.8](http://tools.ietf.org/html/rfc6020#section-9.8)) */
+        char *binary_val;       /**< Base64-encoded binary data ([RFC 6020 sec 9.8](http://tools.ietf.org/html/rfc6020#section-9.8)) */
         char *bits_val;         /**< A set of bits or flags ([RFC 6020 sec 9.7](http://tools.ietf.org/html/rfc6020#section-9.7)) */
         bool bool_val;          /**< A boolean value ([RFC 6020 sec 9.5](http://tools.ietf.org/html/rfc6020#section-9.5)) */
-        int64_t decimal64_val;  /**< 64-bit signed decimal number ([RFC 6020 sec 9.3](http://tools.ietf.org/html/rfc6020#section-9.3)) */
+        double decimal64_val;   /**< 64-bit signed decimal number ([RFC 6020 sec 9.3](http://tools.ietf.org/html/rfc6020#section-9.3)) */
         char *enum_val;         /**< A string from enumerated strings list ([RFC 6020 sec 9.6](http://tools.ietf.org/html/rfc6020#section-9.6)) */
         char *identityref_val;  /**< A reference to an abstract identity ([RFC 6020 sec 9.10](http://tools.ietf.org/html/rfc6020#section-9.10)) */
         char *instanceid_val;   /**< References a data tree node ([RFC 6020 sec 9.13](http://tools.ietf.org/html/rfc6020#section-9.13)) */
@@ -136,43 +137,48 @@ typedef struct sr_val_s {
         uint32_t uint32_val;    /**< 32-bit unsigned integer ([RFC 6020 sec 9.2](http://tools.ietf.org/html/rfc6020#section-9.2)) */
         uint64_t uint64_val;    /**< 64-bit unsigned integer ([RFC 6020 sec 9.2](http://tools.ietf.org/html/rfc6020#section-9.2)) */
     } data;
-
-    /** Length of the data, applicable for those data types where the length may vary. */
-    uint32_t length;
 } sr_val_t;
-
-/**
- * @brief Structure that contains information about a schema supported by sysrepo.
- */
-typedef struct sr_schema_s {
-    char *module_name;      /**< Name of the module. */
-    char *ns;               /**< Namespace of the module used in @ref xp_page "XPath". */
-    char *prefix;           /**< Prefix of the module. */
-    char *revision;         /**< Latest revision date of the module. */
-    char *file_path;        /**< Absolute path to file where the schema is stored. */
-} sr_schema_t;
-
-/**
- * @brief Iterator used for accessing data nodes via ::sr_get_items_iter call.
- */
-typedef struct sr_val_iter_s sr_val_iter_t;
 
 /**
  * @brief Sysrepo error codes.
  */
 typedef enum sr_error_e {
-    SR_ERR_OK = 0,         /**< No error. */
-    SR_ERR_INVAL_ARG,      /**< Invalid argument. */
-    SR_ERR_NOMEM,          /**< Not enough memory. */
-    SR_ERR_NOT_FOUND,      /**< Item not found. */
-    SR_ERR_INTERNAL,       /**< Other internal error. */
-    SR_ERR_INIT_FAILED,    /**< Sysrepo infra initialization failed. */
-    SR_ERR_IO,             /**< Input/Output error. */
-    SR_ERR_DISCONNECT,     /**< The peer disconnected. */
-    SR_ERR_MALFORMED_MSG,  /**< Malformed message. */
-    SR_ERR_UNSUPPORTED,    /**< Unsupported operation requested. */
-    SR_ERR_UNKNOWN_MODEL,  /**< Request includes unknown schema */
+    SR_ERR_OK = 0,             /**< No error. */
+    SR_ERR_INVAL_ARG,          /**< Invalid argument. */
+    SR_ERR_NOMEM,              /**< Not enough memory. */
+    SR_ERR_NOT_FOUND,          /**< Item not found. */
+    SR_ERR_INTERNAL,           /**< Other internal error. */
+    SR_ERR_INIT_FAILED,        /**< Sysrepo infra initialization failed. */
+    SR_ERR_IO,                 /**< Input/Output error. */
+    SR_ERR_DISCONNECT,         /**< The peer disconnected. */
+    SR_ERR_MALFORMED_MSG,      /**< Malformed message. */
+    SR_ERR_UNSUPPORTED,        /**< Unsupported operation requested. */
+    SR_ERR_UNKNOWN_MODEL,      /**< Request includes unknown schema */
+    SR_ERR_BAD_ELEMENT,        /**< Unknown element in existing schema */
+    SR_ERR_VALIDATION_FAILED,  /**< Validation of the changes failed. */
+    SR_ERR_COMMIT_FAILED,      /**< Commit operation failed. */
+    SR_ERR_DATA_EXISTS,        /**< Item already exists. */
+    SR_ERR_DATA_MISSING,       /**< Item does not exists. */
+    SR_ERR_UNAUTHORIZED,       /**< Operation not authorized. */
+    SR_ERR_LOCKED,             /**< Requested resource is already locked. */
 } sr_error_t;
+
+/**
+ * @brief Detailed sysrepo error information.
+ */
+typedef struct sr_error_info_s {
+    const char *message;  /**< Error message. */
+    const char *path;     /**< XPath to the node where the error has been discovered. */
+} sr_error_info_t;
+
+/**
+ * @brief Returns the error message corresponding to the error code.
+ *
+ * @param[in] err_code Error code.
+ *
+ * @return Error message (statically allocated, do not free).
+ */
+const char *sr_strerror(int err_code);
 
 /**
  * @brief Log levels used to determine if message of certain severity should be printed.
@@ -186,24 +192,46 @@ typedef enum {
 } sr_log_level_t;
 
 /**
- * @brief Returns the error message corresponding to the error code.
+ * @brief Enables / disables / changes log level (verbosity) of logging to
+ * standard error output.
  *
- * @param[in] err_code Error code.
+ * By default, logging to stderr is disabled. Setting log level to any value
+ * other than SR_LL_NONE enables the logging to stderr. Setting log level
+ * back to SR_LL_NONE disables the logging to stderr.
  *
- * @return Error message (statically allocated, do not free).
+ * @param[in] log_level requested log level (verbosity).
  */
-const char *sr_strerror(int err_code);
+void sr_log_stderr(sr_log_level_t log_level);
 
 /**
- * @brief Sets logging level of stderr logs and syslog logs.
+ * @brief Enables / disables / changes log level (verbosity) of logging to system log.
  *
- * When connected to sysrepo daemon, this affects only logging of Client Library.
- * In library mode, this settings affect also local Sysrepo Engine logging.
+ * By default, logging into syslog is disabled. Setting log level to any value
+ * other than SR_LL_NONE enables the logging into syslog. Setting log level
+ * back to SR_LL_NONE disables the logging into syslog.
  *
- * @param[in] ll_stderr Log level for stderr logs.
- * @param[in] ll_syslog Log level for syslog logs.
+ * @note Please note that enabling logging into syslog will overwrite your syslog
+ * connection settings (calls openlog), if you are connected to syslog already.
+ *
+ * @param[in] log_level requested log level (verbosity).
  */
-void sr_logger_set_level(sr_log_level_t ll_stderr, sr_log_level_t ll_syslog);
+void sr_log_syslog(sr_log_level_t log_level);
+
+/**
+ * @brief Sets callback that will be called when a log entry would be populated.
+ *
+ * @param[in] level Verbosity level of the log entry.
+ * @param[in] message Message of the log entry.
+ */
+typedef void (*sr_log_cb)(sr_log_level_t level, const char *message);
+
+/**
+ * @brief Sets callback that will be called when a log entry would be populated.
+ * Callback will be called for each message with any log level.
+ *
+ * @param[in] log_callback Callback to be called when a log entry would populated.
+ */
+void sr_log_set_cb(sr_log_cb log_callback);
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -211,15 +239,32 @@ void sr_logger_set_level(sr_log_level_t ll_stderr, sr_log_level_t ll_syslog);
 ////////////////////////////////////////////////////////////////////////////////
 
 /**
- * @brief Data stores that sysrepo supports.
+ * @brief Flags used to override default connection handling by ::sr_connect call.
+ */
+typedef enum sr_conn_flag_e {
+    SR_CONN_DEFAULT = 0,          /**< Default behavior - instantiate library-local Sysrepo Engine if
+                                       the connection to sysrepo daemon is not possible. */
+    SR_CONN_DAEMON_REQUIRED = 1,  /**< Require daemon connection - do not instantiate library-local Sysrepo Engine
+                                       if the library cannot connect to the sysrepo daemon  (and return an error instead). */
+    SR_CONN_DAEMON_START = 2,     /**< If sysrepo daemon is not running, and SR_CONN_DAEMON_REQUIRED was specified,
+                                       start it (only if the process calling ::sr_connect is running under root privileges). */
+} sr_conn_flag_t;
+
+/**
+ * @brief Options overriding default connection handling by ::sr_connect call,
+ * can be bitwise OR-ed value of any ::sr_conn_flag_t flags.
+ */
+typedef uint32_t sr_conn_options_t;
+
+/**
+ * @brief Data stores that sysrepo supports. Both are editable via implicit candidate.
+ * To make changes permanent in edited datastore ::sr_commit must be issued.
+ * @see @ref ds_page "Datastores & Sessions" information page.
  */
 typedef enum sr_datastore_e {
-    SR_DS_RUNNING = 0,    /**< Currently running configuration.
-                               @note Direct writes to running are not allowed, changes need to be made via candidate. */
-    SR_DS_CANDIDATE = 1,  /**< Candidate datastore - accepts configuration changes.
-                               @note Candidate is isolated for each session (not committed changes are not visible in other sessions). */
-    SR_DS_STARTUP = 2     /**< Configuration loaded upon application startup.
-                               @note Direct writes to startup are not allowed, changes need to be made via running. */
+    SR_DS_STARTUP = 0,    /**< Contains configuration data that should be loaded by the controlled application when it starts. */
+    SR_DS_RUNNING = 1,    /**< Contains currently applied configuration and state data of a running application.
+                               @note This datastore is supported only by applications that subscribe for notifications about the changes made in the datastore. */
 } sr_datastore_t;
 
 /**
@@ -227,17 +272,13 @@ typedef enum sr_datastore_e {
  *
  * @param[in] app_name Name of the application connecting to the datastore
  * (can be static string). Used only for accounting purposes.
- * @param[in] allow_library_mode Flag which indicates if the application wants
- * to allow local (library) mode in case that sysrepo daemon is not running.
- * If set to FALSE and the library cannot connect to the deamon, an error will
- * be returned. Otherwise library will initialize its own Sysrepo Engine if the
- * connection to daemon is not possible (but only once per application process).
+ * @param[in] opts Options overriding default connection handling by this call.
  * @param[out] conn_ctx Connection context that can be used for subsequent API
  * calls (automatically allocated, can be released by calling ::sr_disconnect).
  *
  * @return Error code (SR_ERR_OK on success).
  */
-int sr_connect(const char *app_name, const bool allow_library_mode, sr_conn_ctx_t **conn_ctx);
+int sr_connect(const char *app_name, const sr_conn_options_t opts, sr_conn_ctx_t **conn_ctx);
 
 /**
  * @brief Disconnects from the sysrepo datastore (Sysrepo Engine).
@@ -252,10 +293,9 @@ void sr_disconnect(sr_conn_ctx_t *conn_ctx);
 /**
  * @brief Starts a new configuration session.
  *
+ * @see @ref ds_page "Datastores & Sessions" for more information about datastores and sessions.
+ *
  * @param[in] conn_ctx Connection context acquired with ::sr_connect call.
- * @param[in] user_name Effective user name used to authorize the access to
- * datastore (in addition to automatically-detected real user name). If not
- * provided, only automatically-detected real user name will be used for authorization.
  * @param[in] datastore Datastore on which all sysrepo functions within this
  * session will operate. Functionality of some sysrepo calls does not depend on
  * datastore. If your session will contain just calls like these, you can pass
@@ -265,7 +305,37 @@ void sr_disconnect(sr_conn_ctx_t *conn_ctx);
  *
  * @return Error code (SR_ERR_OK on success).
  */
-int sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t datastore, sr_session_ctx_t **session);
+int sr_session_start(sr_conn_ctx_t *conn_ctx, sr_datastore_t datastore, sr_session_ctx_t **session);
+
+/**
+ * @brief Starts a new configuration session on behalf of a different user.
+ *
+ * This call is intended for northbound access to sysrepo from management
+ * applications, that need sysrepo to authorize the operations not only
+ * against the user under which the management application is running, but
+ * also against another user (e.g. user that connected to the management application).
+ *
+ * @note Be aware that authorization of specified user may fail with unexpected
+ * errors in case that the client library uses its own Sysrepo Engine at the
+ * moment and your process in not running under root privileges. To prevent
+ * this situation, consider specifying SR_CONN_DAEMON_REQUIRED flag by
+ * ::sr_connect call or using ::sr_session_start instead of this function.
+ *
+ * @see @ref ds_page "Datastores & Sessions" for more information about datastores and sessions.
+ *
+ * @param[in] conn_ctx Connection context acquired with ::sr_connect call.
+ * @param[in] user_name Effective user name used to authorize the access to
+ * datastore (in addition to automatically-detected real user name).
+ * @param[in] datastore Datastore on which all sysrepo functions within this
+ * session will operate. Functionality of some sysrepo calls does not depend on
+ * datastore. If your session will contain just calls like these, you can pass
+ * any valid value (e.g. SR_RUNNING).
+ * @param[out] session Session context that can be used for subsequent API
+ * calls (automatically allocated, can be released by calling ::sr_session_stop).
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_session_start_user(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t datastore, sr_session_ctx_t **session);
 
 /**
  * @brief Stops current session and releases resources tied to the session.
@@ -276,10 +346,111 @@ int sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastor
  */
 int sr_session_stop(sr_session_ctx_t *session);
 
+/**
+ * @brief Refreshes configuration data cached within the session and starts
+ * operating on fresh data loaded from the datastore.
+ *
+ * Call this function in case that you leave session open for longer time period
+ * and you expect that the data in the datastore may have been changed since
+ * last data (re)load (which occurs by ::sr_session_start, ::sr_commit and
+ * ::sr_discard_changes).
+ *
+ * @see @ref ds_page "Datastores & Sessions" for information about session data caching.
+ *
+ * @note In current implementation, this function call discards any non-committed
+ * changes within the session (it has the same effect as ::sr_discard_changes).
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_session_refresh(sr_session_ctx_t *session);
+
+/**
+ * @brief Retrieves detailed information about the error that has occurred
+ * during the last operation executed within provided session.
+ *
+ * If multiple errors has occurred within the last operation, only the first
+ * one is returned. This call is sufficient for all data retrieval and data
+ * manipulation functions that operate on single-item basis. For operations
+ * such as ::sr_validate or ::sr_commit where multiple errors can occur,
+ * use ::sr_get_last_errors instead.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[out] error_info Detailed error information. Be aware that
+ * returned pointer may change by the next API call executed within the provided
+ * session,  so it's not safe to use this function by concurrent access to the
+ * same session within multiple threads. Do not free or modify returned values.
+ *
+ * @return Error code of the last operation executed within provided session.
+ */
+int sr_get_last_error(sr_session_ctx_t *session, const sr_error_info_t **error_info);
+
+/**
+ * @brief Retrieves detailed information about all errors that have occurred
+ * during the last operation executed within provided session.
+ *
+ * Use this call instead of ::sr_get_last_error by operations where multiple
+ * errors can occur, such as ::sr_validate or ::sr_commit.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[out] error_info Array of detailed error information. Be aware that
+ * returned pointer may change by the next API call executed within the provided
+ * session,  so it's not safe to use this function by concurrent access to the
+ * same session within multiple threads. Do not free or modify returned values.
+ * @param[out] error_cnt Number of errors returned in the error_info array.
+ *
+ * @return Error code of the last operation executed within provided session.
+ */
+int sr_get_last_errors(sr_session_ctx_t *session, const sr_error_info_t **error_info, size_t *error_cnt);
+
 
 ////////////////////////////////////////////////////////////////////////////////
-// Data Retrieval API
+// Data Retrieval API (get / get-config functionality)
 ////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Structure that contains information about one particular schema file installed in sysrepo.
+ */
+typedef struct sr_sch_revision_s {
+    const char *revision;         /**< Revision of the module/submodule. */
+    const char *file_path_yang;   /**< Absolute path to file where the module/submodule is stored (YANG format). */
+    const char *file_path_yin;    /**< Absolute path to file where the module/submodule is stored (.yin format). */
+} sr_sch_revision_t;
+
+/**
+ * @brief Structure that contains information about submodules of a module installed in sysrepo.
+ */
+typedef struct sr_sch_submodule_s {
+    const char *submodule_name;    /**< Submodule name. */
+    sr_sch_revision_t revision;    /**< Revision of the submodule. */
+} sr_sch_submodule_t;
+
+/**
+ * @brief Structure that contains information about a module installed in sysrepo.
+ */
+typedef struct sr_schema_s {
+    const char *module_name;         /**< Name of the module. */
+    const char *ns;                  /**< Namespace of the module used in @ref xp_page "XPath". */
+    const char *prefix;              /**< Prefix of the module. */
+
+    sr_sch_revision_t revision;      /**< Revision the module. */
+
+    sr_sch_submodule_t *submodules;  /**< Array of all installed submodules of the module. */
+    size_t submodule_count;          /**< Number of module's submodules. */
+} sr_schema_t;
+
+/**
+ * @brief Format types of ::sr_get_schema result
+ */
+typedef enum sr_schema_format_e {
+    SR_SCHEMA_YANG,                         /**< YANG format */
+    SR_SCHEMA_YIN                           /**< YIN format */
+}sr_schema_format_t;
+/**
+ * @brief Iterator used for accessing data nodes via ::sr_get_items_iter call.
+ */
+typedef struct sr_val_iter_s sr_val_iter_t;
 
 /**
  * @brief Retrieves list of schemas installed in the sysrepo datastore.
@@ -294,6 +465,25 @@ int sr_session_stop(sr_session_ctx_t *session);
 int sr_list_schemas(sr_session_ctx_t *session, sr_schema_t **schemas, size_t *schema_cnt);
 
 /**
+ * @brief Retrieves the content of specified schema file.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] module_name Name of the requested module.
+ * @param[in] revision Requested revision of the module. If NULL
+ * is passed, the latest revision will be returned.
+ * @param[in] submodule_name Name of the requested submodule. Pass NULL if you are
+ * requesting the content of the main module.
+ * @param[in] format of the returned schema
+ * @param[out] schema_content Content of the specified schema file. Automatically
+ * allocated by the function, should be freed by the caller.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_NOTFOUND if specified schema
+ * file cannot be found in sysrepo repository).
+ */
+int sr_get_schema(sr_session_ctx_t *session, const char *module_name, const char *revision,
+         const char *submodule_name, sr_schema_format_t format, char **schema_content);
+
+/**
  * @brief Retrieves a single data element stored under provided XPath.
  *
  * If the path identifies an empty leaf, a list or a presence container, the value
@@ -305,19 +495,28 @@ int sr_list_schemas(sr_session_ctx_t *session, sr_schema_t **schemas, size_t *sc
  * https://tools.ietf.org/html/draft-ietf-netmod-yang-json#section-6.11
  * for XPath syntax used for identification of yang nodes in sysrepo calls.
  *
+ * @see Use ::sr_get_items or ::sr_get_items_iter for retrieving larger chunks
+ * of data from the datastore. Since they retrieve the data from datastore in
+ * larger chunks, they can work much more efficiently than multiple ::sr_get_item calls.
+ *
  * @param[in] session Session context acquired with ::sr_session_start call.
  * @param[in] path @ref xp_page "XPath" identifier of the data element to be retrieved.
  * @param[out] value Structure containing information about requested element
  * (allocated by the function, can be freed with ::sr_free_val).
  *
  * @return Error code (SR_ERR_OK on success, SR_ERR_NOT_FOUND if the entity is
- * not present in the data tree, or the user does not have read permission to access it).
+ * not present in the data tree, or the user does not have read permission to access it,
+ * SR_UNKNOWN_MODEL if the xpath references unknown model, SR_BAD_ELEMENT if the referenced
+ * node can not be found in schema).
  */
 int sr_get_item(sr_session_ctx_t *session, const char *path, sr_val_t **value);
 
 /**
  * @brief Retrieves an array of data elements stored under provided path XPath
  * (direct children of the entity specified by XPath, non-recursively).
+ *
+ * All data elements are transferred within one message from the datastore,
+ * which is much more efficient that calling multiple ::sr_get_item calls.
  *
  * When called on a leaf-list, returns all leaf-list elements. When called on
  * a list (with keys provided) or a container, returns all direct children of the
@@ -338,8 +537,10 @@ int sr_get_item(sr_session_ctx_t *session, const char *path, sr_val_t **value);
  * for XPath syntax used for identification of yang nodes in sysrepo calls.
  *
  * @see ::sr_get_items_iter can be used for the same purpose as ::sr_get_items
- * call if you expect thet ::sr_get_items could return too large data sets.
- * ::sr_get_items_iter can also be used for recursive subtree retrieval.
+ * call if you expect that ::sr_get_items could return too large data sets.
+ * ::sr_get_items_iter can also be used for recursive subtree retrieval. Since
+ * ::sr_get_items_iter also retrieves the data from datastore in larger chunks,
+ * in can still work very efficiently for large datasets.
  *
  * @param[in] session Session context acquired with ::sr_session_start call.
  * @param[in] path @ref xp_page "XPath" identifier of the data element to be retrieved.
@@ -357,8 +558,11 @@ int sr_get_items(sr_session_ctx_t *session, const char *path, sr_val_t **values,
  * If the recursive flag is true, it recursively iterates over all nodes in the
  * data tree, up to the tree leaves. If the recursive is false, it iterates only
  * over the nodes at the path level (over the values that ::sr_get_items would return).
- * You can use this function instead of ::sr_get_items if you expect many data
- * entities on the same level.
+ *
+ * Requested data elements are transferred from the datastore in larger chunks
+ * of pre-defined size, which is much more efficient that calling multiple
+ * ::sr_get_item calls, and may be less memory demanding than calling ::sr_get_items
+ * on very large datasets.
  *
  * @see @ref xp_page "XPath Addressing" documentation, or
  * https://tools.ietf.org/html/draft-ietf-netmod-yang-json#section-6.11
@@ -391,6 +595,234 @@ int sr_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursiv
  * are not more items in the dataset).
  */
 int sr_get_item_next(sr_session_ctx_t *session, sr_val_iter_t *iter, sr_val_t **value);
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Data Manipulation API (edit-config functionality) - !!! EXPERIMENTAL !!!
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Flags used to override default behavior of data manipulation calls.
+ */
+typedef enum sr_edit_flag_e {
+    SR_EDIT_DEFAULT = 0,        /**< Default behavior - recursive and non-strict. */
+    SR_EDIT_NON_RECURSIVE = 1,  /**< Non-recursive behavior:
+                                     by ::sr_set_item, all preceding nodes (parents) of the identified element must exist,
+                                     by ::sr_delete_item xpath must not identify an non-empty list or non-empty container. */
+    SR_EDIT_STRICT = 2          /**< Strict behavior:
+                                     by ::sr_set_item the identified element must not exist (similar to netconf create operation),
+                                     by ::sr_delete_item the identified element must exist (similar to netconf delete operation). */
+} sr_edit_flag_t;
+
+/**
+ * @brief Options overriding default behavior of data manipulation calls,
+ * can be bitwise OR-ed value of any ::sr_edit_flag_t flags.
+ */
+typedef uint32_t sr_edit_options_t;
+
+/**
+ * @brief Options for specifying move direction of ::sr_move_item call.
+ */
+typedef enum sr_move_direction_e {
+    SR_MOVE_UP = 0,    /**< Move the specified item before its preceding sibling. */
+    SR_MOVE_DOWN = 1,  /**< Move the specified item after its following sibling. */
+} sr_move_direction_t;
+
+/**
+ * @brief Sets the value of the leaf, leaf-list or presence container.
+ *
+ * With default options it recursively creates all missing nodes (containers and
+ * lists including their key leaves) in the path to the specified node (can be
+ * turned off with SR_EDIT_NON_RECURSIVE option). If SR_EDIT_STRICT flag is set,
+ * the node must not exist (otherwise an error is returned). Setting of a leaf-list
+ * value appends the value at the end of the leaf-list.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] path @ref xp_page "XPath" identifier of the data element to be set.
+ * @param[in] value Value to be set on specified path. xpath member of the
+ * ::sr_val_t structure can be NULL. Value will be copied - can be allocated on stack.
+ * @param[in] opts Options overriding default behavior of this call.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED if the user
+ * does not have write permission to any affected node).
+ */
+int sr_set_item(sr_session_ctx_t *session, const char *path, const sr_val_t *value, const sr_edit_options_t opts);
+
+/**
+ * @brief Deletes the nodes under the specified path.
+ *
+ * To delete non-empty lists or containers SR_EDIT_NON_RECURSIVE flag must not be set.
+ * If SR_EDIT_STRICT flag is set the specified node must must exist in the datastore.
+ * If the path includes the list keys, the specified list instance is deleted.
+ * If the path to list does not include keys, all instances of the list are deleted.
+ * SR_ERR_UNAUTHORIZED will be returned if the user does not have write permission to any affected node.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] path @ref xp_page "XPath" identifier of the data element to be deleted.
+ * @param[in] opts Options overriding default behavior of this call.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED if the user
+ * does not have write permission to any affected node).
+ **/
+int sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_options_t opts);
+
+/**
+ * @brief Move the instance of an ordered list in specified direction.
+ *
+ * @note To reorder leaf-list values, you need to delete the leaf-list and
+ * re-create it with requested order again.
+ *
+ * @note To determine current order, you can issue a ::sr_get_items call
+ * (without specifying keys of the list in question).
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] path @ref xp_page "XPath" identifier of the data element to be moved.
+ * @param[in] direction Requested move direction.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED if the user
+ * does not have write permission to any affected node).
+ */
+int sr_move_item(sr_session_ctx_t *session, const char *path, const sr_move_direction_t direction);
+
+/**
+ * @brief Perform the validation of changes made in current session, but do not
+ * commit nor discard them.
+ *
+ * Provides only YANG validation, commit verify subscribers won't be notified in this case.
+ *
+ * @see Use ::sr_get_last_errors to retrieve error information if the validation
+ * returned with an error.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_validate(sr_session_ctx_t *session);
+
+/**
+ * @brief Apply changes made in current session.
+ *
+ * @note Note that in case that you are committing to the running datstore, you also
+ * need to copy the config to startup to make changes permanent after restart.
+ *
+ * @see Use ::sr_get_last_errors to retrieve error information if the commit
+ * operation returned with an error.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_commit(sr_session_ctx_t *session);
+
+/**
+ * @brief Discard non-committed changes made in current session.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_discard_changes(sr_session_ctx_t *session);
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Locking API - !!! EXPERIMENTAL !!!
+////////////////////////////////////////////////////////////////////////////////
+
+/**
+ * @brief Locks the datastore which the session is tied to.
+ *
+ * All data models within the datastore will be locked for writing until
+ * ::sr_unlock_datastore is called or until the session is stopped or terminated
+ * for any reason.
+ *
+ * The lock operation will not be allowed if the user does not have sufficient
+ * permissions for writing into each of the data models in the datastore.
+ *
+ * @note Please note that this API call is experimental in this version of sysrepo and may not work properly yet.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED if the user
+ * does not have sufficient permissions to lock any of the models in the datastore).
+ */
+int sr_lock_datastore(sr_session_ctx_t *session);
+
+/**
+ * @brief Unlocks the datastore which the session is tied to.
+ *
+ * All data models within the datastore will be unlocked if they were locked
+ * by this session.
+ *
+ * @note Please note that this API call is experimental in this version of sysrepo and may not work properly yet.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_unlock_datastore(sr_session_ctx_t *session);
+
+/**
+ * @brief Locks specified data module within the datastore which the session
+ * is tied to.
+ *
+ * Specified data module will be locked for writing in the datastore until
+ * ::sr_unlock_module is called or until the session is stopped or terminated
+ * for any reason.
+ *
+ * The lock operation will not be allowed if the user does not have sufficient
+ * permissions for writing into the specified data module.
+ *
+ * @note Please note that this API call is experimental in this version of sysrepo and may not work properly yet.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] module_name Name of the module to be locked.
+ *
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED if the user
+ * does not have sufficient permissions to lock specified data module).
+ */
+int sr_lock_module(sr_session_ctx_t *session, const char *module_name);
+
+/**
+ * @brief Unlocks specified data module within the datastore which the session
+ * is tied to.
+ *
+ * Specified data module will be unlocked if was locked in the datastore
+ * by this session.
+ *
+ * @note Please note that this API call is experimental in this version of sysrepo and may not work properly yet.
+ *
+ * @param[in] session Session context acquired with ::sr_session_start call.
+ * @param[in] module_name Name of the module to be unlocked.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int sr_unlock_module(sr_session_ctx_t *session, const char *module_name);
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Data module handling API - !!! EXPERIMENTAL !!!
+////////////////////////////////////////////////////////////////////////////////
+
+typedef struct sr_subscription_ctx_s sr_subscription_ctx_t;
+
+int sr_feature_enable(sr_session_ctx_t *session, const char *module_name, const char *feature_name, bool enable);
+
+typedef int (*sr_feature_enable_cb)(const char *module_name, const char *feature_name, bool enable, void *private_ctx);
+
+typedef int (*sr_module_enable_cb)(const char *module_name, bool enable, void *private_ctx);
+
+int sr_feature_enable_subscribe(sr_session_ctx_t *session, sr_feature_enable_cb callback, void *private_ctx,
+        sr_subscription_ctx_t **subscribtion);
+
+int sr_module_enable_subscribe(sr_session_ctx_t *session, sr_module_enable_cb callback, void *private_ctx,
+        sr_subscription_ctx_t **subscribtion);
+
+int sr_unsubscribe(sr_subscription_ctx_t *subscribtion);
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Cleanup Routines
+////////////////////////////////////////////////////////////////////////////////
 
 /**
  * @brief Frees ::sr_val_t structure and all memory allocated within it.

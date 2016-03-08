@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <inttypes.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <pthread.h>
@@ -67,8 +68,13 @@ typedef struct sr_conn_ctx_s {
  * Session context used to identify a configuration session.
  */
 typedef struct sr_session_ctx_s {
-    sr_conn_ctx_t *conn_ctx;  /**< Associated connection context. */
-    uint32_t id;              /**< Assigned session identifier. */
+    sr_conn_ctx_t *conn_ctx;      /**< Associated connection context. */
+    uint32_t id;                  /**< Assigned session identifier. */
+    pthread_mutex_t lock;         /**< Mutex for the session context content. */
+    sr_error_t last_error;        /**< Latest error code returned from an API call. */
+    sr_error_info_t *error_info;  /**< Array of detailed error information from last API call. */
+    size_t error_info_size;       /**< Current size of the error_info array. */
+    size_t error_cnt;             /**< Number of errors that occurred within last API call. */
 } sr_session_ctx_t;
 
 /**
@@ -92,11 +98,139 @@ typedef struct sr_val_iter_s{
     size_t count;                   /**< number of element currently buffered */
 } sr_val_iter_t;
 
-static sr_conn_ctx_t *primary_connection = NULL;  /**< Global variable holding pointer to the primary connection. */
-pthread_mutex_t primary_lock = PTHREAD_MUTEX_INITIALIZER;  /**< Mutex for locking global variable primary_connection. */
+static sr_conn_ctx_t *primary_connection = NULL;                  /**< Global variable holding pointer to the primary connection. */
+static pthread_mutex_t primary_lock = PTHREAD_MUTEX_INITIALIZER;  /**< Mutex for locking global variable primary_connection. */
 
 /**
- * Connect the client to provided unix-domain socket.
+ * @brief Returns provided error code and saves it in the session context.
+ * Should be called as an exit point from any publicly available API function
+ * taking the session as an argument.
+ */
+static sr_error_t
+cl_session_return(sr_session_ctx_t *session, sr_error_t error_code)
+{
+    CHECK_NULL_ARG(session);
+
+    pthread_mutex_lock(&session->lock);
+    session->last_error = error_code;
+    pthread_mutex_unlock(&session->lock);
+
+    return error_code;
+}
+
+/**
+ * @brief Set detailed error information into session context.
+ */
+static int
+cl_session_set_error(sr_session_ctx_t *session, const char *error_message, const char *error_path)
+{
+    CHECK_NULL_ARG(session);
+
+    pthread_mutex_lock(&session->lock);
+
+    if (0 == session->error_info_size) {
+        /* need to allocate the space for the error */
+        session->error_info = calloc(1, sizeof(*session->error_info));
+        if (NULL == session->error_info) {
+            SR_LOG_ERR_MSG("Unable to allocate error information.");
+            pthread_mutex_unlock(&session->lock);
+            return SR_ERR_NOMEM;
+        }
+        session->error_info_size = 1;
+    } else {
+        /* space for the error already allocated, release old error data */
+        if (NULL != session->error_info[0].message) {
+            free((void*)session->error_info[0].message);
+            session->error_info[0].message = NULL;
+        }
+        if (NULL != session->error_info[0].path) {
+            free((void*)session->error_info[0].path);
+            session->error_info[0].path = NULL;
+        }
+    }
+    if (NULL != error_message) {
+        session->error_info[0].message = strdup(error_message);
+        if (NULL == session->error_info[0].message) {
+            SR_LOG_ERR_MSG("Unable to allocate error message.");
+            pthread_mutex_unlock(&session->lock);
+            return SR_ERR_NOMEM;
+        }
+    }
+    if (NULL != error_path) {
+        session->error_info[0].path = strdup(error_path);
+        if (NULL == session->error_info[0].path) {
+            SR_LOG_ERR_MSG("Unable to allocate error xpath.");
+            pthread_mutex_unlock(&session->lock);
+            return SR_ERR_NOMEM;
+        }
+    }
+
+    session->error_cnt = 1;
+    pthread_mutex_unlock(&session->lock);
+
+    return SR_ERR_OK;
+}
+
+/**
+ * @brief Set detailed error information from GPB error array into session context.
+ */
+static int
+cl_session_set_errors(sr_session_ctx_t *session, Sr__Error **errors, size_t error_cnt)
+{
+    sr_error_info_t *tmp_info = NULL;
+
+    CHECK_NULL_ARG2(session, errors);
+
+    pthread_mutex_lock(&session->lock);
+
+    if (session->error_info_size < error_cnt) {
+        tmp_info = realloc(session->error_info, (error_cnt * sizeof(*tmp_info)));
+        if (NULL == tmp_info) {
+            SR_LOG_ERR_MSG("Unable to allocate error information.");
+            pthread_mutex_unlock(&session->lock);
+            return SR_ERR_NOMEM;
+        }
+        session->error_info = tmp_info;
+        session->error_info_size = error_cnt;
+    }
+    for (size_t i = 0; i < error_cnt; i++) {
+        if (NULL != errors[i]->message) {
+            session->error_info[i].message = strdup(errors[i]->message);
+            if (NULL == session->error_info[i].message) {
+                SR_LOG_WRN_MSG("Unable to allocate error message, will be left NULL.");
+            }
+        }
+        if (NULL != errors[i]->path) {
+            session->error_info[i].path = strdup(errors[i]->path);
+            if (NULL == session->error_info[i].path) {
+                SR_LOG_WRN_MSG("Unable to allocate error xpath, will be left NULL.");
+            }
+        }
+    }
+
+    session->error_cnt = error_cnt;
+    pthread_mutex_unlock(&session->lock);
+
+    return SR_ERR_OK;
+}
+
+/**
+ * @brief Clear number of errors stored within the session context.
+ */
+int
+cl_session_clear_errors(sr_session_ctx_t *session)
+{
+    CHECK_NULL_ARG(session);
+
+    pthread_mutex_lock(&session->lock);
+    session->error_cnt = 0;
+    pthread_mutex_unlock(&session->lock);
+
+    return SR_ERR_OK;
+}
+
+/**
+ * @brief Connects the client to provided unix-domain socket.
  */
 static int
 cl_socket_connect(sr_conn_ctx_t *conn_ctx, const char *socket_path)
@@ -143,7 +277,7 @@ cl_socket_connect(sr_conn_ctx_t *conn_ctx, const char *socket_path)
 }
 
 /**
- * Initialize our own sysrepo engine (fallback option if sysrepo daemon is not running)
+ * @brief Initializes our own sysrepo engine (fallback option if sysrepo daemon is not running)
  */
 static int
 cl_engine_init_local(sr_conn_ctx_t *conn_ctx, const char *socket_path)
@@ -246,7 +380,20 @@ cl_conn_remove_session(sr_conn_ctx_t *connection, sr_session_ctx_t *session)
 }
 
 /**
- * Expand message buffer of a connection to fit given size, if needed.
+ * @brief Cleans up a client library -local session.
+ */
+static void
+cl_session_cleanup(sr_session_ctx_t *session)
+{
+    if (NULL != session) {
+        sr_free_errors(session->error_info, session->error_info_size);
+        pthread_mutex_destroy(&session->lock);
+        free(session);
+    }
+}
+
+/**
+ * @brief Expands message buffer of a connection to fit given size, if needed.
  */
 static int
 cl_conn_msg_buf_expand(sr_conn_ctx_t *conn_ctx, size_t required_size)
@@ -269,7 +416,7 @@ cl_conn_msg_buf_expand(sr_conn_ctx_t *conn_ctx, size_t required_size)
 }
 
 /**
- * Sends a message via provided connection.
+ * @brief Sends a message via provided connection.
  */
 static int
 cl_message_send(sr_conn_ctx_t *conn_ctx, Sr__Msg *msg)
@@ -318,7 +465,7 @@ cl_message_send(sr_conn_ctx_t *conn_ctx, Sr__Msg *msg)
 }
 
 /*
- * Receive a message on provided connection (blocks until a message is received).
+ * @brief Receives a message on provided connection (blocks until a message is received).
  */
 static int
 cl_message_recv(sr_conn_ctx_t *conn_ctx, Sr__Msg **msg)
@@ -393,66 +540,75 @@ cl_message_recv(sr_conn_ctx_t *conn_ctx, Sr__Msg **msg)
 }
 
 /**
- * Process (send) the request over the connection and receive the response.
+ *@brief  Processes (sends) the request over the connection and receive the response.
  */
 static int
-cl_request_process(sr_conn_ctx_t *conn_ctx, Sr__Msg *msg_req, Sr__Msg **msg_resp,
+cl_request_process(sr_session_ctx_t *session, Sr__Msg *msg_req, Sr__Msg **msg_resp,
         const Sr__Operation expected_response_op)
 {
     int rc = SR_ERR_OK;
 
-    SR_LOG_DBG("Sending a request for operation=%d", expected_response_op);
+    CHECK_NULL_ARG4(session, session->conn_ctx, msg_req, msg_resp);
 
-    pthread_mutex_lock(&conn_ctx->lock);
+    SR_LOG_DBG("Sending %s request.", sr_operation_name(expected_response_op));
+
+    pthread_mutex_lock(&session->conn_ctx->lock);
 
     /* send the request */
-    rc = cl_message_send(conn_ctx, msg_req);
+    rc = cl_message_send(session->conn_ctx, msg_req);
     if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Unable to send the message with request (conn=%p, operation=%d).",
-                (void*)conn_ctx, msg_req->request->operation);
-        pthread_mutex_unlock(&conn_ctx->lock);
+        SR_LOG_ERR("Unable to send the message with request (session id=%"PRIu32", operation=%s).",
+                session->id, sr_operation_name(msg_req->request->operation));
+        pthread_mutex_unlock(&session->conn_ctx->lock);
         return rc;
     }
 
-    SR_LOG_DBG("Request for operation=%d sent, waiting for response.", expected_response_op);
+    SR_LOG_DBG("%s request sent, waiting for response.", sr_operation_name(expected_response_op));
 
     /* receive the response */
-    rc = cl_message_recv(conn_ctx, msg_resp);
+    rc = cl_message_recv(session->conn_ctx, msg_resp);
     if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Unable to receive the message with response (conn=%p, operation=%d).",
-                (void*)conn_ctx, msg_req->request->operation);
-        pthread_mutex_unlock(&conn_ctx->lock);
+        SR_LOG_ERR("Unable to receive the message with response (session id=%"PRIu32", operation=%s).",
+                session->id, sr_operation_name(msg_req->request->operation));
+        pthread_mutex_unlock(&session->conn_ctx->lock);
         return rc;
     }
 
-    pthread_mutex_unlock(&conn_ctx->lock);
+    pthread_mutex_unlock(&session->conn_ctx->lock);
 
-    SR_LOG_DBG("Response for operation=%d received, processing.", expected_response_op);
+    SR_LOG_DBG("%s response received, processing.", sr_operation_name(expected_response_op));
 
     /* validate the response */
     rc = sr_pb_msg_validate(*msg_resp, SR__MSG__MSG_TYPE__RESPONSE, expected_response_op);
     if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Malformed message with response received (conn=%p, operation=%d).",
-                (void*)conn_ctx, msg_req->request->operation);
+        SR_LOG_ERR("Malformed message with response received (session id=%"PRIu32", operation=%s).",
+                session->id, sr_operation_name(msg_req->request->operation));
         return rc;
     }
 
     /* check for errors */
     if (SR_ERR_OK != (*msg_resp)->response->result) {
-        /* don't log not found err*/
-        if (SR_ERR_NOT_FOUND != (*msg_resp)->response->result){
-            SR_LOG_ERR("Error by processing of the request conn=%p, operation=%d): %s.",
-                (void*)conn_ctx, msg_req->request->operation, (NULL != (*msg_resp)->response->error_msg) ?
-                        (*msg_resp)->response->error_msg : sr_strerror((*msg_resp)->response->result));
+        if (NULL != (*msg_resp)->response->error) {
+            /* set detailed error information into session */
+            rc = cl_session_set_error(session, (*msg_resp)->response->error->message, (*msg_resp)->response->error->path);
+        }
+        /* don't log expected errors */
+        if (SR_ERR_NOT_FOUND != (*msg_resp)->response->result &&
+                SR_ERR_VALIDATION_FAILED != (*msg_resp)->response->result &&
+                SR_ERR_COMMIT_FAILED != (*msg_resp)->response->result) {
+            SR_LOG_ERR("Error by processing of the request (session id=%"PRIu32", operation=%s): %s.",
+                    session->id, sr_operation_name(msg_req->request->operation),
+                (NULL != (*msg_resp)->response->error && NULL != (*msg_resp)->response->error->message) ?
+                        (*msg_resp)->response->error->message : sr_strerror((*msg_resp)->response->result));
         }
         return (*msg_resp)->response->result;
     }
 
-    return SR_ERR_OK;
+    return rc;
 }
 
 /**
- * Create get_items request with options and send it
+ * @brief Creates get_items request with options and send it
  */
 static int
 cl_send_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursive, size_t offset, size_t limit, Sr__Msg **msg_resp){
@@ -484,7 +640,7 @@ cl_send_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursi
 
 
     /* send the request and receive the response */
-    rc = cl_request_process(session->conn_ctx, msg_req, msg_resp, SR__OPERATION__GET_ITEMS);
+    rc = cl_request_process(session, msg_req, msg_resp, SR__OPERATION__GET_ITEMS);
     if (SR_ERR_NOT_FOUND == rc){
         goto cleanup;
     }
@@ -505,7 +661,7 @@ cl_send_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursi
 }
 
 int
-sr_connect(const char *app_name, const bool allow_library_mode, sr_conn_ctx_t **conn_ctx_p)
+sr_connect(const char *app_name, const sr_conn_options_t opts, sr_conn_ctx_t **conn_ctx_p)
 {
     sr_conn_ctx_t *ctx = NULL;
     int rc = SR_ERR_OK;
@@ -542,32 +698,50 @@ sr_connect(const char *app_name, const bool allow_library_mode, sr_conn_ctx_t **
     }
     pthread_mutex_unlock(&primary_lock);
 
-    // TODO: milestone 2: attempt to connect to sysrepo daemon socket
-    SR_LOG_WRN_MSG("Sysrepo daemon not detected. Connecting to local Sysrepo Engine.");
-
-    /* connect in library mode */
-    ctx->library_mode = true;
-    snprintf(socket_path, PATH_MAX, "%s-%d", CL_LCONN_PATH_PREFIX, getpid());
-
-    /* attempt to connect to our own sysrepo engine (local engine may already exist) */
-    rc = cl_socket_connect(ctx, socket_path);
+    /* attempt to connect to sysrepo daemon socket */
+    rc = cl_socket_connect(ctx, SR_DAEMON_SOCKET);
     if (SR_ERR_OK != rc) {
-        /* initialize our own sysrepo engine and attempt to connect again */
-        SR_LOG_INF_MSG("Local Sysrepo Engine not running yet, initializing new one.");
+        if (opts & SR_CONN_DAEMON_REQUIRED) {
+            SR_LOG_ERR_MSG("Sysrepo daemon not detected while library mode disallowed.");
+            if ((opts & SR_CONN_DAEMON_START) && (0 == getuid())) {
+                /* sysrepo daemon start requested and process is running under root privileges */
+                int ret = system("sysrepod");
+                if (0 == ret) {
+                    SR_LOG_INF_MSG("Sysrepo daemon has been started.");
+                } else {
+                    SR_LOG_WRN("Unable to start sysrepo daemon, error code=%d.", ret);
+                }
+            }
+            goto cleanup;
+        } else {
+            SR_LOG_WRN_MSG("Sysrepo daemon not detected. Connecting to local Sysrepo Engine.");
 
-        rc = cl_engine_init_local(ctx, socket_path);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Unable to start local sysrepo engine.");
-            goto cleanup;
+            /* connect in library mode */
+            ctx->library_mode = true;
+            snprintf(socket_path, PATH_MAX, "%s-%d.sock", CL_LCONN_PATH_PREFIX, getpid());
+
+            /* attempt to connect to our own sysrepo engine (local engine may already exist) */
+            rc = cl_socket_connect(ctx, socket_path);
+            if (SR_ERR_OK != rc) {
+                /* initialize our own sysrepo engine and attempt to connect again */
+                SR_LOG_INF_MSG("Local Sysrepo Engine not running yet, initializing new one.");
+
+                rc = cl_engine_init_local(ctx, socket_path);
+                if (SR_ERR_OK != rc) {
+                    SR_LOG_ERR_MSG("Unable to start local sysrepo engine.");
+                    goto cleanup;
+                }
+                rc = cl_socket_connect(ctx, socket_path);
+                if (SR_ERR_OK != rc) {
+                    SR_LOG_ERR_MSG("Unable to connect to the local sysrepo engine.");
+                    goto cleanup;
+                }
+            }
+            SR_LOG_INF("Connected to local Sysrepo Engine at socket=%s", socket_path);
         }
-        rc = cl_socket_connect(ctx, socket_path);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Unable to connect to the local sysrepo engine.");
-            goto cleanup;
-        }
+    } else {
+        SR_LOG_INF("Connected to daemon Sysrepo Engine at socket=%s", SR_DAEMON_SOCKET);
     }
-
-    SR_LOG_INF("Connected to Sysrepo Engine at socket=%s", socket_path);
 
     *conn_ctx_p = ctx;
     return SR_ERR_OK;
@@ -575,6 +749,9 @@ sr_connect(const char *app_name, const bool allow_library_mode, sr_conn_ctx_t **
 cleanup:
     if ((NULL != ctx) && (NULL != ctx->local_cm)) {
         cm_cleanup(ctx->local_cm);
+    }
+    if (NULL != ctx) {
+        pthread_mutex_destroy(&ctx->lock);
     }
     free(ctx);
     return rc;
@@ -594,7 +771,10 @@ sr_disconnect(sr_conn_ctx_t *conn_ctx)
 
         if (conn_ctx->primary) {
             /* destroy global resources */
+            pthread_mutex_lock(&primary_lock);
             sr_logger_cleanup();
+            primary_connection = NULL;
+            pthread_mutex_unlock(&primary_lock);
         }
 
         /* destroy all sessions */
@@ -602,7 +782,7 @@ sr_disconnect(sr_conn_ctx_t *conn_ctx)
         while (NULL != session) {
             tmp = session;
             session = session->next;
-            free(tmp->session);
+            cl_session_cleanup(tmp->session);
             free(tmp);
         }
 
@@ -614,7 +794,13 @@ sr_disconnect(sr_conn_ctx_t *conn_ctx)
 }
 
 int
-sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t datastore, sr_session_ctx_t **session_p)
+sr_session_start(sr_conn_ctx_t *conn_ctx, sr_datastore_t datastore, sr_session_ctx_t **session_p)
+{
+    return sr_session_start_user(conn_ctx, NULL, datastore, session_p);
+}
+
+int
+sr_session_start_user(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t datastore, sr_session_ctx_t **session_p)
 {
     sr_session_ctx_t *session = NULL;
     Sr__Msg *msg_req = NULL, *msg_resp = NULL;
@@ -627,6 +813,15 @@ sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t 
     if (NULL == session) {
         SR_LOG_ERR_MSG("Cannot allocate memory for session context.");
         rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    session->conn_ctx = conn_ctx;
+
+    /* initialize session mutext */
+    rc = pthread_mutex_init(&session->lock, NULL);
+    if (0 != rc) {
+        SR_LOG_ERR_MSG("Cannot initialize session mutex.");
+        rc = SR_ERR_INIT_FAILED;
         goto cleanup;
     }
 
@@ -643,12 +838,13 @@ sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t 
         msg_req->request->session_start_req->user_name = strdup(user_name);
         if (NULL == msg_req->request->session_start_req->user_name) {
             SR_LOG_ERR_MSG("Cannot duplicate user name for session_start message.");
+            rc = SR_ERR_NOMEM;
             goto cleanup;
         }
     }
 
     /* send the request and receive the response */
-    rc = cl_request_process(conn_ctx, msg_req, &msg_resp, SR__OPERATION__SESSION_START);
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__SESSION_START);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Error by processing of session_stop request.");
         goto cleanup;
@@ -664,9 +860,7 @@ sr_session_start(sr_conn_ctx_t *conn_ctx, const char *user_name, sr_datastore_t 
         SR_LOG_WRN_MSG("Error by adding the session to the connection session list.");
     }
 
-    session->conn_ctx = conn_ctx;
     *session_p = session;
-
     return SR_ERR_OK;
 
 cleanup:
@@ -675,6 +869,9 @@ cleanup:
     }
     if (NULL != msg_resp) {
         sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    if (NULL != session) {
+        pthread_mutex_destroy(&session->lock);
     }
     free(session);
     return rc;
@@ -688,6 +885,8 @@ sr_session_stop(sr_session_ctx_t *session)
 
     CHECK_NULL_ARG2(session, session->conn_ctx);
 
+    cl_session_clear_errors(session);
+
     /* prepare session_stop message */
     rc = sr_pb_req_alloc(SR__OPERATION__SESSION_STOP, session->id, &msg_req);
     if (SR_ERR_OK != rc) {
@@ -697,7 +896,7 @@ sr_session_stop(sr_session_ctx_t *session)
     msg_req->request->session_stop_req->session_id = session->id;
 
     /* send the request and receive the response */
-    rc = cl_request_process(session->conn_ctx, msg_req, &msg_resp, SR__OPERATION__SESSION_STOP);
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__SESSION_STOP);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Error by processing of session_stop request.");
         goto cleanup;
@@ -711,9 +910,10 @@ sr_session_stop(sr_session_ctx_t *session)
 
     sr__msg__free_unpacked(msg_req, NULL);
     sr__msg__free_unpacked(msg_resp, NULL);
-    free(session);
 
-    return SR_ERR_OK;
+    cl_session_cleanup(session);
+
+    return SR_ERR_OK; /* do not use cl_session_return - session has been freed one line above */
 
 cleanup:
     if (NULL != msg_req) {
@@ -722,7 +922,46 @@ cleanup:
     if (NULL != msg_resp) {
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return rc;
+    return cl_session_return(session, rc);
+}
+
+int
+sr_session_refresh(sr_session_ctx_t *session)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare session_stop message */
+    rc = sr_pb_req_alloc(SR__OPERATION__SESSION_REFRESH, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate session_data_refresh message.");
+        goto cleanup;
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__SESSION_REFRESH);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of session_data_refresh request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
 }
 
 int
@@ -733,6 +972,8 @@ sr_list_schemas(sr_session_ctx_t *session, sr_schema_t **schemas, size_t *schema
 
     CHECK_NULL_ARG4(session, session->conn_ctx, schemas, schema_cnt);
 
+    cl_session_clear_errors(session);
+
     /* prepare list_schemas message */
     rc = sr_pb_req_alloc(SR__OPERATION__LIST_SCHEMAS, session->id, &msg_req);
     if (SR_ERR_OK != rc) {
@@ -741,7 +982,7 @@ sr_list_schemas(sr_session_ctx_t *session, sr_schema_t **schemas, size_t *schema
     }
 
     /* send the request and receive the response */
-    rc = cl_request_process(session->conn_ctx, msg_req, &msg_resp, SR__OPERATION__LIST_SCHEMAS);
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__LIST_SCHEMAS);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Error by processing of list_schemas request.");
         goto cleanup;
@@ -759,7 +1000,7 @@ sr_list_schemas(sr_session_ctx_t *session, sr_schema_t **schemas, size_t *schema
     sr__msg__free_unpacked(msg_req, NULL);
     sr__msg__free_unpacked(msg_resp, NULL);
 
-    return SR_ERR_OK;
+    return cl_session_return(session, SR_ERR_OK);
 
 cleanup:
     if (NULL != msg_req) {
@@ -768,7 +1009,132 @@ cleanup:
     if (NULL != msg_resp) {
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return rc;
+    return cl_session_return(session, rc);
+}
+
+int
+sr_get_schema(sr_session_ctx_t *session, const char *module_name, const char *module_revision,
+        const char *submodule_name, sr_schema_format_t format, char **schema_content)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(session, session->conn_ctx, module_name, schema_content);
+
+    cl_session_clear_errors(session);
+
+    /* prepare get_schema message */
+    rc = sr_pb_req_alloc(SR__OPERATION__GET_SCHEMA, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate get_schema message.");
+        goto cleanup;
+    }
+
+    /* set arguments */
+    msg_req->request->get_schema_req->module_name = strdup(module_name);
+    if (NULL == msg_req->request->get_schema_req->module_name) {
+        SR_LOG_ERR_MSG("Cannot duplicate module name.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    if (NULL != submodule_name) {
+        msg_req->request->get_schema_req->submodule_name = strdup(submodule_name);
+        if (NULL == msg_req->request->get_schema_req->submodule_name) {
+            SR_LOG_ERR_MSG("Cannot duplicate submodule name.");
+            rc = SR_ERR_NOMEM;
+            goto cleanup;
+        }
+    }
+    if(NULL != module_revision) {
+        msg_req->request->get_schema_req->revision = strdup(module_revision);
+        if (NULL == msg_req->request->get_schema_req->revision) {
+            SR_LOG_ERR_MSG("Cannot duplicate schema revision.");
+            rc = SR_ERR_NOMEM;
+            goto cleanup;
+        }
+    }
+    msg_req->request->get_schema_req->yang_format = (format == SR_SCHEMA_YANG);
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__GET_SCHEMA);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of get_schema request.");
+        goto cleanup;
+    }
+
+    /* move pointers to schema content, so we don't need to duplicate the memory */
+    if (NULL != msg_resp->response->get_schema_resp->schema_content) {
+        *schema_content = msg_resp->response->get_schema_resp->schema_content;
+        msg_resp->response->get_schema_resp->schema_content = NULL;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_feature_enable(sr_session_ctx_t *session, const char *module_name, const char *feature_name, bool enable)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(session, session->conn_ctx, module_name, feature_name);
+
+    cl_session_clear_errors(session);
+
+    /* prepare feature_enable message */
+    rc = sr_pb_req_alloc(SR__OPERATION__FEATURE_ENABLE, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate feature_enable message.");
+        goto cleanup;
+    }
+
+    /* set arguments */
+    msg_req->request->feature_enable_req->module_name = strdup(module_name);
+    if (NULL == msg_req->request->feature_enable_req->module_name) {
+        SR_LOG_ERR_MSG("Cannot duplicate module name.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    msg_req->request->feature_enable_req->feature_name = strdup(feature_name);
+    if (NULL == msg_req->request->feature_enable_req->feature_name) {
+        SR_LOG_ERR_MSG("Cannot feature name.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    msg_req->request->feature_enable_req->enable = enable;
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__FEATURE_ENABLE);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of feature_enable request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
 }
 
 int
@@ -779,10 +1145,13 @@ sr_get_item(sr_session_ctx_t *session, const char *path, sr_val_t **value)
 
     CHECK_NULL_ARG4(session, session->conn_ctx, path, value);
 
+    cl_session_clear_errors(session);
+
     /* prepare get_item message */
     rc = sr_pb_req_alloc(SR__OPERATION__GET_ITEM, session->id, &msg_req);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Cannot allocate get_item message.");
+        rc = SR_ERR_NOMEM;
         goto cleanup;
     }
 
@@ -790,11 +1159,12 @@ sr_get_item(sr_session_ctx_t *session, const char *path, sr_val_t **value)
     msg_req->request->get_item_req->path = strdup(path);
     if (NULL == msg_req->request->get_item_req->path) {
         SR_LOG_ERR_MSG("Cannot allocate get_item path.");
+        rc = SR_ERR_NOMEM;
         goto cleanup;
     }
 
     /* send the request and receive the response */
-    rc = cl_request_process(session->conn_ctx, msg_req, &msg_resp, SR__OPERATION__GET_ITEM);
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__GET_ITEM);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Error by processing of get_item request.");
         goto cleanup;
@@ -810,7 +1180,7 @@ sr_get_item(sr_session_ctx_t *session, const char *path, sr_val_t **value)
     sr__msg__free_unpacked(msg_req, NULL);
     sr__msg__free_unpacked(msg_resp, NULL);
 
-    return SR_ERR_OK;
+    return cl_session_return(session, SR_ERR_OK);
 
 cleanup:
     if (NULL != msg_req) {
@@ -819,7 +1189,7 @@ cleanup:
     if (NULL != msg_resp) {
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return rc;
+    return cl_session_return(session, rc);
 }
 
 int
@@ -830,6 +1200,8 @@ sr_get_items(sr_session_ctx_t *session, const char *path, sr_val_t **values, siz
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG5(session, session->conn_ctx, path, values, value_cnt);
+
+    cl_session_clear_errors(session);
 
     /* prepare get_item message */
     rc = sr_pb_req_alloc(SR__OPERATION__GET_ITEMS, session->id, &msg_req);
@@ -842,11 +1214,12 @@ sr_get_items(sr_session_ctx_t *session, const char *path, sr_val_t **values, siz
     msg_req->request->get_items_req->path = strdup(path);
     if (NULL == msg_req->request->get_items_req->path) {
         SR_LOG_ERR_MSG("Cannot allocate get_items path.");
+        rc = SR_ERR_NOMEM;
         goto cleanup;
     }
 
     /* send the request and receive the response */
-    rc = cl_request_process(session->conn_ctx, msg_req, &msg_resp, SR__OPERATION__GET_ITEMS);
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__GET_ITEMS);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Error by processing of get_items request.");
         goto cleanup;
@@ -880,7 +1253,7 @@ sr_get_items(sr_session_ctx_t *session, const char *path, sr_val_t **values, siz
     sr__msg__free_unpacked(msg_req, NULL);
     sr__msg__free_unpacked(msg_resp, NULL);
 
-    return SR_ERR_OK;
+    return cl_session_return(session, SR_ERR_OK);
 
 cleanup:
     free(vals);
@@ -890,7 +1263,7 @@ cleanup:
     if (NULL != msg_resp) {
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return rc;
+    return cl_session_return(session, rc);
 }
 
 
@@ -901,11 +1274,14 @@ sr_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursive, s
     sr_val_iter_t *it = NULL;
     int rc = SR_ERR_OK;
 
+    cl_session_clear_errors(session);
+
     CHECK_NULL_ARG4(session, session->conn_ctx, path, iter);
     rc = cl_send_get_items_iter(session, path, recursive, 0, CL_GET_ITEMS_FETCH_LIMIT, &msg_resp);
     if (SR_ERR_NOT_FOUND == rc){
         SR_LOG_DBG("No items found for xpath '%s'", path);
-        goto cleanup;
+        /* SR_ERR_NOT_FOUND will be returned on get_item_next call */
+        rc = SR_ERR_OK;
     }
     else if (SR_ERR_OK != rc){
         SR_LOG_ERR("Sending get_items request failed '%s'", path);
@@ -926,7 +1302,7 @@ sr_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursive, s
     it->path = strdup(path);
     if (NULL == it->path){
         SR_LOG_ERR_MSG("Duplication of path failed");
-        rc = SR_ERR_INTERNAL;
+        rc = SR_ERR_NOMEM;
         goto cleanup;
     }
 
@@ -952,7 +1328,7 @@ sr_get_items_iter(sr_session_ctx_t *session, const char *path, bool recursive, s
 
     sr__msg__free_unpacked(msg_resp, NULL);
 
-    return SR_ERR_OK;
+    return cl_session_return(session, SR_ERR_OK);
 
 cleanup:
     if (NULL != msg_resp) {
@@ -964,7 +1340,7 @@ cleanup:
         }
         free(it);
     }
-    return rc;
+    return cl_session_return(session, rc);
 }
 
 int
@@ -975,25 +1351,24 @@ sr_get_item_next(sr_session_ctx_t *session, sr_val_iter_t *iter, sr_val_t **valu
 
     CHECK_NULL_ARG3(session, iter, value);
 
+    cl_session_clear_errors(session);
+
     if (0 == iter->count) {
         /* No more data to be read */
         *value = NULL;
         return SR_ERR_NOT_FOUND;
-    }
-    else if (iter->index < iter->count) {
+    } else if (iter->index < iter->count) {
         /* There are buffered data */
         *value = iter->buff_values[iter->index++];
         iter->offset++;
-    }
-    else {
+    } else {
         /* Fetch more items */
         rc = cl_send_get_items_iter(session, iter->path, iter->recursive, iter->offset,
                 CL_GET_ITEMS_FETCH_LIMIT, &msg_resp);
         if (SR_ERR_NOT_FOUND == rc){
             SR_LOG_DBG("All items has been read for path '%s'", iter->path);
             goto cleanup;
-        }
-        else if (SR_ERR_OK != rc){
+        } else if (SR_ERR_OK != rc){
             SR_LOG_ERR("Fetching more items failed '%s'", iter->path);
             goto cleanup;
         }
@@ -1036,13 +1411,13 @@ sr_get_item_next(sr_session_ctx_t *session, sr_val_iter_t *iter, sr_val_t **valu
         iter->offset++;
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return SR_ERR_OK;
+    return cl_session_return(session, SR_ERR_OK);
 
 cleanup:
     if (NULL != msg_resp){
         sr__msg__free_unpacked(msg_resp, NULL);
     }
-    return rc;
+    return cl_session_return(session, rc);
 }
 
 void
@@ -1060,3 +1435,453 @@ sr_free_val_iter(sr_val_iter_t *iter){
     free(iter);
 }
 
+int
+sr_set_item(sr_session_ctx_t *session, const char *path, const sr_val_t *value, const sr_edit_options_t opts)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(session, session->conn_ctx, path);
+
+    cl_session_clear_errors(session);
+
+    /* prepare get_item message */
+    rc = sr_pb_req_alloc(SR__OPERATION__SET_ITEM, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate set_item message.");
+        goto cleanup;
+    }
+
+    /* fill in the path and options */
+    msg_req->request->set_item_req->path = strdup(path);
+    if (NULL == msg_req->request->set_item_req->path) {
+        SR_LOG_ERR_MSG("Cannot allocate set_item path.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    msg_req->request->set_item_req->options = opts;
+
+    /* duplicate the content of sr_val_t to gpb */
+    if (NULL != value) {
+        rc = sr_dup_val_t_to_gpb(value, &msg_req->request->set_item_req->value);
+        if (SR_ERR_OK != rc){
+            SR_LOG_ERR_MSG("Copying from sr_val_t to gpb failed.");
+            goto cleanup;
+        }
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__SET_ITEM);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of set_item request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_options_t opts)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(session, session->conn_ctx, path);
+
+    cl_session_clear_errors(session);
+
+    /* prepare get_item message */
+    rc = sr_pb_req_alloc(SR__OPERATION__DELETE_ITEM, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate delete_item message.");
+        goto cleanup;
+    }
+
+    /* fill in the path and options */
+    msg_req->request->delete_item_req->path = strdup(path);
+    if (NULL == msg_req->request->delete_item_req->path) {
+        SR_LOG_ERR_MSG("Cannot allocate delete_item path.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    msg_req->request->delete_item_req->options = opts;
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__DELETE_ITEM);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of delete_item request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_move_item(sr_session_ctx_t *session, const char *path, const sr_move_direction_t direction)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(session, session->conn_ctx, path);
+
+    cl_session_clear_errors(session);
+
+    /* prepare get_item message */
+    rc = sr_pb_req_alloc(SR__OPERATION__MOVE_ITEM, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate move_item message.");
+        goto cleanup;
+    }
+
+    /* fill in the path and direction */
+    msg_req->request->move_item_req->path = strdup(path);
+    if (NULL == msg_req->request->move_item_req->path) {
+        SR_LOG_ERR_MSG("Cannot allocate move_item path.");
+        rc = SR_ERR_NOMEM;
+        goto cleanup;
+    }
+    msg_req->request->move_item_req->direction = sr_move_direction_sr_to_gpb(direction);
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__MOVE_ITEM);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of move_item request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_validate(sr_session_ctx_t *session)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    Sr__ValidateResp *validate_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare validate message */
+    rc = sr_pb_req_alloc(SR__OPERATION__VALIDATE, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate validate message.");
+        goto cleanup;
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__VALIDATE);
+    if ((SR_ERR_OK != rc) && (SR_ERR_VALIDATION_FAILED != rc)) {
+        SR_LOG_ERR_MSG("Error by processing of validate request.");
+        goto cleanup;
+    }
+
+    validate_resp = msg_resp->response->validate_resp;
+    if (SR_ERR_VALIDATION_FAILED == rc) {
+        SR_LOG_ERR("Validate operation failed with %zu error(s).", validate_resp->n_errors);
+
+        /* store validation errors within the session */
+        if (validate_resp->n_errors > 0) {
+            cl_session_set_errors(session, validate_resp->errors, validate_resp->n_errors);
+        }
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, rc);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_commit(sr_session_ctx_t *session)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    Sr__CommitResp *commit_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare commit message */
+    rc = sr_pb_req_alloc(SR__OPERATION__COMMIT, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate validate message.");
+        goto cleanup;
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__COMMIT);
+    if ((SR_ERR_OK != rc) && (SR_ERR_COMMIT_FAILED != rc)) {
+        SR_LOG_ERR_MSG("Error by processing of commit request.");
+        goto cleanup;
+    }
+
+    commit_resp = msg_resp->response->commit_resp;
+    if (SR_ERR_COMMIT_FAILED == rc) {
+        SR_LOG_ERR("Commit operation failed with %zu error(s).", commit_resp->n_errors);
+
+        /* store commit errors within the session */
+        if (commit_resp->n_errors > 0) {
+            cl_session_set_errors(session, commit_resp->errors, commit_resp->n_errors);
+        }
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, rc);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_discard_changes(sr_session_ctx_t *session)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare discard_changes message */
+    rc = sr_pb_req_alloc(SR__OPERATION__DISCARD_CHANGES, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate discard_changes message.");
+        goto cleanup;
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__DISCARD_CHANGES);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of discard_changes request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_lock_datastore(sr_session_ctx_t *session)
+{
+    return sr_lock_module(session, NULL);
+}
+
+int
+sr_unlock_datastore(sr_session_ctx_t *session)
+{
+    return sr_unlock_module(session, NULL);
+}
+
+int
+sr_lock_module(sr_session_ctx_t *session, const char *module_name)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare lock message */
+    rc = sr_pb_req_alloc(SR__OPERATION__LOCK, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate lock message.");
+        goto cleanup;
+    }
+
+    /* fill-in model name (if provided) */
+    if (NULL != module_name) {
+        msg_req->request->lock_req->module_name = strdup(module_name);
+        if (NULL == msg_req->request->lock_req->module_name) {
+            SR_LOG_ERR_MSG("Could not duplicate module name.");
+            rc = SR_ERR_NOMEM;
+            goto cleanup;
+        }
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__LOCK);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of lock request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_unlock_module(sr_session_ctx_t *session, const char *module_name)
+{
+    Sr__Msg *msg_req = NULL, *msg_resp = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->conn_ctx);
+
+    cl_session_clear_errors(session);
+
+    /* prepare lock message */
+    rc = sr_pb_req_alloc(SR__OPERATION__UNLOCK, session->id, &msg_req);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Cannot allocate unlock message.");
+        goto cleanup;
+    }
+
+    /* fill-in model name (if provided) */
+    if (NULL != module_name) {
+        msg_req->request->unlock_req->module_name = strdup(module_name);
+        if (NULL == msg_req->request->unlock_req->module_name) {
+            SR_LOG_ERR_MSG("Could not duplicate module name.");
+            rc = SR_ERR_NOMEM;
+            goto cleanup;
+        }
+    }
+
+    /* send the request and receive the response */
+    rc = cl_request_process(session, msg_req, &msg_resp, SR__OPERATION__UNLOCK);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Error by processing of unlock request.");
+        goto cleanup;
+    }
+
+    sr__msg__free_unpacked(msg_req, NULL);
+    sr__msg__free_unpacked(msg_resp, NULL);
+
+    return cl_session_return(session, SR_ERR_OK);
+
+cleanup:
+    if (NULL != msg_req) {
+        sr__msg__free_unpacked(msg_req, NULL);
+    }
+    if (NULL != msg_resp) {
+        sr__msg__free_unpacked(msg_resp, NULL);
+    }
+    return cl_session_return(session, rc);
+}
+
+int
+sr_get_last_error(sr_session_ctx_t *session, const sr_error_info_t **error_info)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, error_info);
+
+    pthread_mutex_lock(&session->lock);
+
+    if (0 == session->error_cnt) {
+        /* no detailed error information, let's create it from the last error code */
+        pthread_mutex_unlock(&session->lock);
+        rc = cl_session_set_error(session, sr_strerror(session->last_error), NULL);
+        if (SR_ERR_OK != rc) {
+            return rc;
+        }
+    }
+
+    *error_info = session->error_info;
+    pthread_mutex_unlock(&session->lock);
+
+    return session->last_error;
+}
+
+int
+sr_get_last_errors(sr_session_ctx_t *session, const sr_error_info_t **error_info, size_t *error_cnt)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(session, error_info, error_cnt);
+
+    pthread_mutex_lock(&session->lock);
+
+    if (0 == session->error_cnt) {
+        /* no detailed error information, let's create it from the last error code */
+        pthread_mutex_unlock(&session->lock);
+        rc = cl_session_set_error(session, sr_strerror(session->last_error), NULL);
+        if (SR_ERR_OK != rc) {
+            return rc;
+        }
+    }
+
+    *error_info = session->error_info;
+    *error_cnt = session->error_cnt;
+    pthread_mutex_unlock(&session->lock);
+
+    return session->last_error;
+}
