@@ -268,7 +268,7 @@ sr_save_data_tree_file(const char *file_name, const struct lyd_node *data_tree)
     }
     lockf(fileno(f), F_LOCK, 0);
 
-    if( 0 != lyd_print_file(f, data_tree, LYD_XML_FORMAT, LYP_WITHSIBLINGS)){
+    if( 0 != lyd_print_file(f, data_tree, LYD_XML, LYP_WITHSIBLINGS | LYP_FORMAT)){
         SR_LOG_ERR("Failed to write output into %s", file_name);
         return SR_ERR_INTERNAL;
     }
@@ -2339,6 +2339,20 @@ sr_get_lock_data_file_name(const char *data_search_dir, const char *module_name,
         free(tmp);
     }
     return rc;
+}
+
+int
+sr_get_persist_data_file_name(const char *data_search_dir, const char *module_name, char **file_name)
+{
+    CHECK_NULL_ARG2(module_name, file_name);
+    char *tmp = NULL;
+    int rc = sr_str_join(data_search_dir, module_name, &tmp);
+    if (SR_ERR_OK == rc) {
+        rc = sr_str_join(tmp, SR_PERSIST_FILE_EXT, file_name);
+        free(tmp);
+        return rc;
+    }
+    return SR_ERR_NOMEM;
 }
 
 int
