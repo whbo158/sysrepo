@@ -266,6 +266,16 @@ int dm_commit_load_modified_models(dm_ctx_t *dm_ctx, const dm_session_t *session
 int dm_commit_write_files(dm_session_t *session, dm_commit_context_t *c_ctx);
 
 /**
+ * @brief Notifies about the changes made within the running commit. It is
+ * a post-commit notification - failure do not cause the commit to fail.
+ * @param [in] dm_ctx
+ * @param [in] session
+ * @param [in] c_ctx
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_commit_notify(dm_ctx_t *dm_ctx, dm_session_t *session, dm_commit_context_t *c_ctx);
+
+/**
  * @brief Frees all resources allocated in commit context closes
  * modif_count of files.
  */
@@ -445,5 +455,36 @@ int dm_install_module(dm_ctx_t *dm_ctx, const char *module_name, const char *rev
  */
 int dm_uninstall_module(dm_ctx_t *dm_ctx, const char *module_name, const char *revision);
 
+/**
+ * @brief Checks whether the module has an enabled subtree.
+ * @param [in] ctx
+ * @param [in] module_name - name of the module to be checked
+ * @param [out] module - Match module, can be NULL
+ * @param [out] res - True if there is at least one enabled subtree in the module,
+ * False otherwise
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_has_enabled_subtree(dm_ctx_t *ctx, const char *module_name, struct lys_module **module, bool *res);
+
+/**
+ * @brief Copies the content of the module from one datastore to the another.
+ * @param [in] dm_ctx
+ * @param [in] session
+ * @param [in] module_name
+ * @param [in] source
+ * @param [in] destination
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_copy_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_name, sr_datastore_t source, sr_datastore_t destination);
+
+/**
+ * @brief Copies all enabled modules from one datastore to the another.
+ * @param [in] dm_ctx
+ * @param [in] session
+ * @param [in] src
+ * @param [in] dst
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_copy_all_models(dm_ctx_t *dm_ctx, dm_session_t *session, sr_datastore_t src, sr_datastore_t dst);
 /**@} Data manager*/
 #endif /* SRC_DATA_MANAGER_H_ */

@@ -199,6 +199,10 @@ cl_message_recv(sr_conn_ctx_t *conn_ctx, Sr__Msg **msg)
             if (errno == EINTR) {
                 continue;
             }
+            if (EAGAIN == errno || EWOULDBLOCK == errno) {
+                SR_LOG_ERR_MSG("While waiting for a response, time out has expired.");
+                return SR_ERR_TIME_OUT;
+            }
             SR_LOG_ERR("Error by receiving of the message: %s.", strerror(errno));
             return SR_ERR_MALFORMED_MSG;
         }
@@ -390,12 +394,22 @@ cl_request_process(sr_session_ctx_t *session, Sr__Msg *msg_req, Sr__Msg **msg_re
         const Sr__Operation expected_response_op)
 {
     int rc = SR_ERR_OK;
+    struct timeval tv = { 0, };
 
     CHECK_NULL_ARG4(session, session->conn_ctx, msg_req, msg_resp);
 
     SR_LOG_DBG("Sending %s request.", sr_operation_name(expected_response_op));
 
     pthread_mutex_lock(&session->conn_ctx->lock);
+    /* some operation may take more time, raise the timeout */
+    if (SR__OPERATION__COMMIT == expected_response_op) {
+        tv.tv_sec = CL_REQUEST_LONG_TIMEOUT;
+        tv.tv_usec = 0;
+        rc = setsockopt(session->conn_ctx->fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv));
+        if (-1 == rc) {
+            SR_LOG_WRN("Unable to set timeout for socket operations: %s", strerror(errno));
+        }
+    }
 
     /* send the request */
     rc = cl_message_send(session->conn_ctx, msg_req);
@@ -417,6 +431,15 @@ cl_request_process(sr_session_ctx_t *session, Sr__Msg *msg_req, Sr__Msg **msg_re
         return rc;
     }
 
+    /* change socket timeout to the standard value*/
+    if (SR__OPERATION__COMMIT == expected_response_op) {
+        tv.tv_sec = CL_REQUEST_TIMEOUT;
+        rc = setsockopt(session->conn_ctx->fd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv));
+        if (-1 == rc) {
+            SR_LOG_WRN("Unable to set timeout for socket operations: %s", strerror(errno));
+        }
+    }
+
     pthread_mutex_unlock(&session->conn_ctx->lock);
 
     SR_LOG_DBG("%s response received, processing.", sr_operation_name(expected_response_op));
@@ -433,14 +456,14 @@ cl_request_process(sr_session_ctx_t *session, Sr__Msg *msg_req, Sr__Msg **msg_re
     if (SR_ERR_OK != (*msg_resp)->response->result) {
         if (NULL != (*msg_resp)->response->error) {
             /* set detailed error information into session */
-            rc = cl_session_set_error(session, (*msg_resp)->response->error->message, (*msg_resp)->response->error->path);
+            rc = cl_session_set_error(session, (*msg_resp)->response->error->message, (*msg_resp)->response->error->xpath);
         }
-        /* don't log expected errors */
+        /* log the error (except expected ones) */
         if (SR_ERR_NOT_FOUND != (*msg_resp)->response->result &&
                 SR_ERR_VALIDATION_FAILED != (*msg_resp)->response->result &&
                 SR_ERR_COMMIT_FAILED != (*msg_resp)->response->result) {
-            SR_LOG_ERR("Error by processing of the request (session id=%"PRIu32", operation=%s): %s.",
-                    session->id, sr_operation_name(msg_req->request->operation),
+            SR_LOG_ERR("Error by processing of the %s request (session id=%"PRIu32"): %s.",
+                    sr_operation_name(msg_req->request->operation), session->id,
                 (NULL != (*msg_resp)->response->error && NULL != (*msg_resp)->response->error->message) ?
                         (*msg_resp)->response->error->message : sr_strerror((*msg_resp)->response->result));
         }
@@ -472,9 +495,9 @@ cl_session_set_error(sr_session_ctx_t *session, const char *error_message, const
             free((void*)session->error_info[0].message);
             session->error_info[0].message = NULL;
         }
-        if (NULL != session->error_info[0].path) {
-            free((void*)session->error_info[0].path);
-            session->error_info[0].path = NULL;
+        if (NULL != session->error_info[0].xpath) {
+            free((void*)session->error_info[0].xpath);
+            session->error_info[0].xpath = NULL;
         }
     }
     if (NULL != error_message) {
@@ -486,8 +509,8 @@ cl_session_set_error(sr_session_ctx_t *session, const char *error_message, const
         }
     }
     if (NULL != error_path) {
-        session->error_info[0].path = strdup(error_path);
-        if (NULL == session->error_info[0].path) {
+        session->error_info[0].xpath = strdup(error_path);
+        if (NULL == session->error_info[0].xpath) {
             SR_LOG_ERR_MSG("Unable to allocate error xpath.");
             pthread_mutex_unlock(&session->lock);
             return SR_ERR_NOMEM;
@@ -526,9 +549,9 @@ cl_session_set_errors(sr_session_ctx_t *session, Sr__Error **errors, size_t erro
                 SR_LOG_WRN_MSG("Unable to allocate error message, will be left NULL.");
             }
         }
-        if (NULL != errors[i]->path) {
-            session->error_info[i].path = strdup(errors[i]->path);
-            if (NULL == session->error_info[i].path) {
+        if (NULL != errors[i]->xpath) {
+            session->error_info[i].xpath = strdup(errors[i]->xpath);
+            if (NULL == session->error_info[i].xpath) {
                 SR_LOG_WRN_MSG("Unable to allocate error xpath, will be left NULL.");
             }
         }
