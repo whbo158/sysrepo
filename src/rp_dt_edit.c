@@ -387,6 +387,13 @@ rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const
             rc = SR_ERR_INTERNAL;
         }
     }
+    /* remove default tag if the default value has been explictly set */
+    if (NULL == node && sch_node->nodetype == LYS_LEAF && ((struct lys_node_leaf *) sch_node)->dflt != NULL && 0 == strcmp(((struct lys_node_leaf *) sch_node)->dflt, new_value) ){
+        rc = rp_dt_find_node(info->node, xpath, dm_is_running_ds_session(session), &node);
+        CHECK_RC_LOG_GOTO(rc, cleanup, "Created node %s not found", xpath);
+        node->dflt = 0;
+    }
+    lyd_wd_add(module->ctx, &info->node, LYD_WD_IMPL_TAG);
 cleanup:
     free(new_value);
     if (NULL != info){
@@ -689,9 +696,11 @@ rp_dt_commit(rp_ctx_t *rp_ctx, rp_session_t *session, sr_error_info_t **errors, 
 
     rc = dm_commit_write_files(session->dm_session, commit_ctx);
 
-    SR_LOG_DBG_MSG("Commit (6/7): data write succeeded");
+    if (SR_ERR_OK == rc) {
+        SR_LOG_DBG_MSG("Commit (6/7): data write succeeded");
 
-    rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, commit_ctx);
+        rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, commit_ctx);
+    }
 
 cleanup:
     dm_free_commit_context(rp_ctx->dm_ctx, commit_ctx);
