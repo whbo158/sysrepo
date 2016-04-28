@@ -163,6 +163,12 @@ rp_module_install_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *sessio
 
     SR_LOG_DBG_MSG("Processing module_install request.");
 
+    rc = ac_check_module_permissions(session->ac_session, msg->request->module_install_req->module_name, AC_OPER_READ_WRITE);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR("Access control check failed for xpath '%s'", msg->request->module_install_req->module_name);
+        return rc;
+    }
+
     /* allocate the response */
     rc = sr_pb_resp_alloc(SR__OPERATION__MODULE_INSTALL, session->id, &resp);
     if (SR_ERR_OK != rc) {
@@ -1198,7 +1204,7 @@ rp_init(cm_ctx_t *cm_ctx, rp_ctx_t **rp_ctx_p)
     ctx->cm_ctx = cm_ctx;
 
     /* initialize access control module */
-    rc = ac_init(&ctx->ac_ctx);
+    rc = ac_init(SR_DATA_SEARCH_DIR, &ctx->ac_ctx);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Access Control module initialization failed.");
         goto cleanup;

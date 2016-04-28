@@ -38,10 +38,11 @@
  * @brief Access Control module context.
  */
 typedef struct ac_ctx_s {
-    bool priviledged_process;  /**< Sysrepo Engine is running within an privileged process */
-    uid_t proc_euid;           /**< Effective uid of the process at the time of initialization. */
-    gid_t proc_egid;           /**< Effective gid of the process at the time of initialization. */
-    pthread_mutex_t lock;      /**< Context lock. Used for mutual exclusion if we are changing process-wide settings. */
+    const char *data_search_dir;  /**< Directory with data files of individual YANG modules. */
+    bool priviledged_process;     /**< Sysrepo Engine is running within an privileged process */
+    uid_t proc_euid;              /**< Effective uid of the process at the time of initialization. */
+    gid_t proc_egid;              /**< Effective gid of the process at the time of initialization. */
+    pthread_mutex_t lock;         /**< Context lock. Used for mutual exclusion if we are changing process-wide settings. */
 } ac_ctx_t;
 
 /**
@@ -66,7 +67,7 @@ typedef enum ac_permission_e {
  * @brief Access control information tied to individual YANG modules.
  */
 typedef struct ac_module_info_s {
-    const char *module_name;                 /**< Name of the module. */
+    const char *module_name;                /**< Name of the module. */
     const char *xpath;                      /**< XPath used only for fast lookup. */
     ac_permission_t read_permission;        /**< Read permission is granted. */
     ac_permission_t read_write_permission;  /**< Read & write permissions are granted. */
@@ -203,20 +204,116 @@ ac_check_file_access_with_eid(ac_ctx_t *ac_ctx, const char *file_name,
     return (SR_ERR_OK == rc_tmp) ? rc : rc_tmp;
 }
 
+/**
+ * @brief Checks if the session is authorized to perform specified operation
+ * on specified module of node (one of these two can be specified).
+ */
+static int
+ac_check_module_node_permissions(ac_session_t *session, const char *module_name, const char *node_xpath,
+        const ac_operation_t operation)
+{
+    ac_module_info_t lookup_info = { 0, };
+    ac_module_info_t *module_info = NULL;
+    char *file_name = NULL;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(session, session->ac_ctx);
+
+    if (NULL != module_name) {
+        lookup_info.module_name = module_name;
+    } else {
+        lookup_info.xpath = node_xpath;
+    }
+    module_info = sr_btree_search(session->module_info_btree, &lookup_info);
+    if (NULL != module_info) {
+        /* found match in cache, try to check from cache */
+        if (AC_OPER_READ == operation && AC_PERMISSION_UNKNOWN != module_info->read_permission) {
+            if (AC_PERMISSION_ALLOWED == module_info->read_permission) {
+                return SR_ERR_OK;
+            } else {
+                return SR_ERR_UNAUTHORIZED;
+            }
+        }
+        if (AC_OPER_READ_WRITE == operation && AC_PERMISSION_UNKNOWN != module_info->read_write_permission) {
+            if (AC_PERMISSION_ALLOWED == module_info->read_write_permission) {
+                return SR_ERR_OK;
+            } else {
+                return SR_ERR_UNAUTHORIZED;
+            }
+        }
+    } else {
+        /* match in cache not found, create new entry */
+        module_info = calloc(1, sizeof(*module_info));
+        if (NULL == module_info) {
+            SR_LOG_ERR_MSG("Cannot allocate module access control info entry.");
+            return SR_ERR_NOMEM;
+        }
+        if (NULL != module_name) {
+            module_info->module_name = strdup(module_name);
+            if (NULL ==  module_info->module_name) {
+                SR_LOG_ERR_MSG("Cannot duplicate module name.");
+                free(module_info);
+                return rc;
+            }
+        } else {
+            rc = sr_copy_first_ns(node_xpath, (char **) &module_info->module_name);
+            if (SR_ERR_OK != rc) {
+                SR_LOG_ERR_MSG("Cannot duplicate module name.");
+                free(module_info);
+                return rc;
+            }
+        }
+        rc = sr_btree_insert(session->module_info_btree, module_info);
+        if (SR_ERR_OK != rc) {
+            SR_LOG_ERR_MSG("Cannot insert new entry into binary tree for module access control info.");
+            free(module_info);
+            return SR_ERR_INTERNAL;
+        }
+    }
+
+    /* do the check */
+    rc = sr_get_data_file_name(session->ac_ctx->data_search_dir, module_info->module_name, SR_DS_STARTUP, &file_name);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Retrieving data file name failed.");
+        return rc;
+    }
+    rc = ac_check_file_permissions(session, file_name, operation);
+
+    if (SR_ERR_NOT_FOUND == rc) {
+        /* there is nothing to check if the file does not exist - return OK */
+        SR_LOG_WRN("Data file '%s' not found, considering as authorized.", file_name);
+        rc = SR_ERR_OK;
+    }
+    free(file_name);
+
+    /* save correct results in the cache */
+    if (SR_ERR_OK == rc || SR_ERR_UNAUTHORIZED == rc) {
+        if (AC_OPER_READ == operation) {
+            module_info->read_permission = (SR_ERR_OK == rc) ? AC_PERMISSION_ALLOWED : AC_PERMISSION_DENIED;
+        } else {
+            module_info->read_write_permission = (SR_ERR_OK == rc) ? AC_PERMISSION_ALLOWED : AC_PERMISSION_DENIED;
+        }
+    }
+
+    return rc;
+}
+
 int
-ac_init(ac_ctx_t **ac_ctx)
+ac_init(const char *data_search_dir, ac_ctx_t **ac_ctx)
 {
     ac_ctx_t *ctx = NULL;
+    int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG(ac_ctx);
 
     /* allocate and initialize the context */
     ctx = calloc(1, sizeof(*ctx));
-    if (NULL == ctx) {
-        SR_LOG_ERR_MSG("Unable to allocate Access Control module context.");
-        return SR_ERR_NOMEM;
-    }
+    CHECK_NULL_NOMEM_RETURN(ctx);
+
     pthread_mutex_init(&ctx->lock, NULL);
+
+    ctx->data_search_dir = strdup(data_search_dir);
+    CHECK_NULL_NOMEM_GOTO(ctx->data_search_dir, rc, cleanup);
 
     /* save current euid and egid */
     ctx->proc_euid = geteuid();
@@ -230,13 +327,18 @@ ac_init(ac_ctx_t **ac_ctx)
     }
 
     *ac_ctx = ctx;
-    return SR_ERR_OK;
+    return rc;
+
+cleanup:
+    ac_cleanup(ctx);
+    return rc;
 }
 
 void
 ac_cleanup(ac_ctx_t *ac_ctx)
 {
     if (NULL != ac_ctx) {
+        free((void*)ac_ctx->data_search_dir);
         pthread_mutex_destroy(&ac_ctx->lock);
         free(ac_ctx);
     }
@@ -281,79 +383,19 @@ ac_session_cleanup(ac_session_t *session)
 }
 
 int
+ac_check_module_permissions(ac_session_t *session, const char *module_name, const ac_operation_t operation)
+{
+    CHECK_NULL_ARG3(session, session->ac_ctx, module_name);
+
+    return ac_check_module_node_permissions(session, module_name, NULL, operation);
+}
+
+int
 ac_check_node_permissions(ac_session_t *session, const char *node_xpath, const ac_operation_t operation)
 {
-    ac_module_info_t lookup_info = {0,};
-    ac_module_info_t *module_info = NULL;
-    char *file_name = NULL;
-    int rc = SR_ERR_OK;
+    CHECK_NULL_ARG3(session, session->ac_ctx, node_xpath);
 
-    CHECK_NULL_ARG2(session, node_xpath);
-
-    lookup_info.xpath = node_xpath;
-    module_info = sr_btree_search(session->module_info_btree, &lookup_info);
-    if (NULL != module_info) {
-        /* found match in cache, try to check from cache */
-        if (AC_OPER_READ == operation && AC_PERMISSION_UNKNOWN != module_info->read_permission) {
-            if (AC_PERMISSION_ALLOWED == module_info->read_permission) {
-                return SR_ERR_OK;
-            } else {
-                return SR_ERR_UNAUTHORIZED;
-            }
-        }
-        if (AC_OPER_READ_WRITE == operation && AC_PERMISSION_UNKNOWN != module_info->read_write_permission) {
-            if (AC_PERMISSION_ALLOWED == module_info->read_write_permission) {
-                return SR_ERR_OK;
-            } else {
-                return SR_ERR_UNAUTHORIZED;
-            }
-        }
-    } else {
-        /* match in cache not found, create new entry */
-        module_info = calloc(1, sizeof(*module_info));
-        if (NULL == module_info) {
-            SR_LOG_ERR_MSG("Cannot allocate module access control info entry.");
-            return SR_ERR_NOMEM;
-        }
-        rc = sr_copy_first_ns(node_xpath, (char **) &module_info->module_name);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Cannot duplicate module name.");
-            free(module_info);
-            return rc;
-        }
-        rc = sr_btree_insert(session->module_info_btree, module_info);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Cannot insert new entry into binary tree for module access control info.");
-            free(module_info);
-            return SR_ERR_INTERNAL;
-        }
-    }
-
-    /* do the check */
-    rc = sr_get_data_file_name(SR_DATA_SEARCH_DIR, module_info->module_name, SR_DS_STARTUP, &file_name);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("Retrieving data file name failed.");
-        return rc;
-    }
-    rc = ac_check_file_permissions(session, file_name, operation);
-
-    if (SR_ERR_NOT_FOUND == rc) {
-        /* there is nothing to check if the file does not exist - return OK */
-        SR_LOG_WRN("Data file '%s' not found, considering as authorized.", file_name);
-        rc = SR_ERR_OK;
-    }
-    free(file_name);
-
-    /* save correct results in the cache */
-    if (SR_ERR_OK == rc || SR_ERR_UNAUTHORIZED == rc) {
-        if (AC_OPER_READ == operation) {
-            module_info->read_permission = (SR_ERR_OK == rc) ? AC_PERMISSION_ALLOWED : AC_PERMISSION_DENIED;
-        } else {
-            module_info->read_write_permission = (SR_ERR_OK == rc) ? AC_PERMISSION_ALLOWED : AC_PERMISSION_DENIED;
-        }
-    }
-
-    return rc;
+    return ac_check_module_node_permissions(session, NULL, node_xpath, operation);
 }
 
 int

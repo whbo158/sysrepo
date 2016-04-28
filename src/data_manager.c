@@ -39,7 +39,10 @@
 
 /**
  * @brief Helper structure for advisory locking. Holds
- * binary tree with filename -> fd maping.
+ * binary tree with filename -> fd maping. This structure
+ * is used to avoid the loss of the lock by file closing.
+ * File name is first looked up in this structure to detect if the
+ * file is currently opened by the process.
  */
 typedef struct dm_lock_ctx_s {
     sr_btree_t *lock_files;       /**< Binary tree of lock files for fast look up by file name */
@@ -209,6 +212,7 @@ dm_get_schema_info(dm_ctx_t *dm_ctx, const char *module_name, dm_schema_info_t *
     }
     return rc;
 }
+
 /**
  * @brief Check whether the file_name corresponds to the schema file.
  * @return 1 if it does, 0 otherwise.
@@ -217,7 +221,7 @@ static int
 dm_is_schema_file(const char *file_name)
 {
     CHECK_NULL_ARG(file_name);
-    return sr_str_ends_with(file_name, SR_SCHEMA_YIN_FILE_EXT);
+    return sr_str_ends_with(file_name, SR_SCHEMA_YIN_FILE_EXT) || sr_str_ends_with(file_name, SR_SCHEMA_YANG_FILE_EXT);
 }
 
 /**
@@ -254,8 +258,9 @@ dm_load_schema_file(dm_ctx_t *dm_ctx, const char *dir_name, const char *file_nam
     }
 
     /* load schema tree */
+    LYS_INFORMAT fmt = sr_str_ends_with(file_name, SR_SCHEMA_YIN_FILE_EXT) ? LYS_IN_YIN : LYS_IN_YANG;
     pthread_rwlock_wrlock(&dm_ctx->lyctx_lock);
-    module = lys_parse_path(dm_ctx->ly_ctx, schema_filename, LYS_IN_YIN);
+    module = lys_parse_path(dm_ctx->ly_ctx, schema_filename, fmt);
     free(schema_filename);
     if (module == NULL) {
         SR_LOG_WRN("Unable to parse a schema file: %s", file_name);
@@ -269,7 +274,6 @@ dm_load_schema_file(dm_ctx_t *dm_ctx, const char *dir_name, const char *file_nam
 
     rc = sr_btree_insert(dm_ctx->schema_info_tree, si);
     if (SR_ERR_OK != rc) {
-        printf("insert failed %s", module->name);
         dm_free_schema_info(si);
         if (SR_ERR_DATA_EXISTS != rc) {
             SR_LOG_WRN_MSG("Insert into schema binary tree failed");

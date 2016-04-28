@@ -69,7 +69,7 @@ print_current_config(sr_session_ctx_t *session)
 
     rc = sr_get_items(session, "/ietf-interfaces:*//*", &values, &count);
     if (SR_ERR_OK != rc) {
-        printf("Error: %s", sr_strerror(rc));
+        printf("Error by sr_get_items: %s", sr_strerror(rc));
         return;
     }
     for (size_t i = 0; i < count; i++){
@@ -93,17 +93,17 @@ main(int argc, char **argv)
     sr_subscription_ctx_t *subscription = NULL;
     int rc = SR_ERR_OK;
 
-    sr_log_stderr(SR_LL_DBG);
-
     /* connect to sysrepo */
     rc = sr_connect("example_application", SR_CONN_DEFAULT, &connection);
     if (SR_ERR_OK != rc) {
+        fprintf(stderr, "Error by sr_connect: %s\n", sr_strerror(rc));
         goto cleanup;
     }
 
     /* start session */
     rc = sr_session_start(connection, SR_DS_STARTUP, SR_SESS_DEFAULT, &session);
     if (SR_ERR_OK != rc) {
+        fprintf(stderr, "Error by sr_session_start: %s\n", sr_strerror(rc));
         goto cleanup;
     }
 
@@ -114,6 +114,7 @@ main(int argc, char **argv)
     /* subscribe for changes in running config */
     rc = sr_module_change_subscribe(session, "ietf-interfaces", true, module_change_cb, NULL, &subscription);
     if (SR_ERR_OK != rc) {
+        fprintf(stderr, "Error by sr_module_change_subscribe: %s\n", sr_strerror(rc));
         goto cleanup;
     }
 
