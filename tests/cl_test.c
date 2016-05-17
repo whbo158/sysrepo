@@ -1032,7 +1032,7 @@ cl_notification_test(void **state)
     assert_non_null(conn);
 
     sr_session_ctx_t *session = NULL;
-    sr_subscription_ctx_t *subscription1 = NULL, *subscription2 = NULL, *subscription3 = NULL;
+    sr_subscription_ctx_t *subscription = NULL;
     int callback_called = 0;
     sr_val_t value = { 0, };
     int rc = SR_ERR_OK;
@@ -1041,16 +1041,18 @@ cl_notification_test(void **state)
     rc = sr_session_start(conn, SR_DS_RUNNING, SR_SESS_DEFAULT, &session);
     assert_int_equal(rc, SR_ERR_OK);
 
-    rc = sr_module_install_subscribe(session, test_module_install_cb, &callback_called, &subscription1);
+    /* subscribe to some notifications */
+    rc = sr_module_install_subscribe(session, test_module_install_cb, &callback_called, &subscription);
     assert_int_equal(rc, SR_ERR_OK);
 
-    rc = sr_feature_enable_subscribe(session, test_feature_enable_cb, &callback_called, &subscription2);
+    rc = sr_feature_enable_subscribe(session, test_feature_enable_cb, &callback_called, &subscription);
     assert_int_equal(rc, SR_ERR_OK);
 
     rc = sr_module_change_subscribe(session, "example-module", true,
-            test_module_change_cb, &callback_called, &subscription3);
+            test_module_change_cb, &callback_called, &subscription);
     assert_int_equal(rc, SR_ERR_OK);
 
+    /* do some changes */
     rc = sr_module_install(session, "example-module", NULL, true);
     assert_int_equal(rc, SR_ERR_OK);
 
@@ -1075,7 +1077,6 @@ cl_notification_test(void **state)
     rc = sr_feature_enable(session, "ietf-interfaces", "pre-provisioning", false);
     assert_int_equal(rc, SR_ERR_OK);
 
-    // change & commit something, expect module change callback
     /* perform a set-item request */
     value.type = SR_STRING_T;
     value.data.string_val = "notification_test";
@@ -1109,17 +1110,11 @@ cl_notification_test(void **state)
     rc = sr_lock_module(session, "example-module");
     assert_int_equal(rc, SR_ERR_UNKNOWN_MODEL);
 
+    rc = sr_unsubscribe(session, subscription);
+    assert_int_equal(rc, SR_ERR_OK);
+
     /* stop the session */
     rc = sr_session_stop(session);
-    assert_int_equal(rc, SR_ERR_OK);
-
-    rc = sr_unsubscribe(subscription1);
-    assert_int_equal(rc, SR_ERR_OK);
-
-    rc = sr_unsubscribe(subscription2);
-    assert_int_equal(rc, SR_ERR_OK);
-
-    rc = sr_unsubscribe(subscription3);
     assert_int_equal(rc, SR_ERR_OK);
 }
 
@@ -1201,7 +1196,7 @@ cl_copy_config_test(void **state)
     rc = sr_session_stop(session_running);
     assert_int_equal(rc, SR_ERR_OK);
 
-    rc = sr_unsubscribe(subscription);
+    rc = sr_unsubscribe(NULL, subscription);
     assert_int_equal(rc, SR_ERR_OK);
 }
 
@@ -1271,7 +1266,7 @@ cl_rpc_test(void **state)
     assert_int_equal(rc, SR_ERR_OK);
 
     /* unsubscribe */
-    rc = sr_unsubscribe(subscription);
+    rc = sr_unsubscribe(NULL, subscription);
     assert_int_equal(rc, SR_ERR_OK);
 }
 
@@ -1371,9 +1366,63 @@ candidate_ds_test(void **state)
     rc = sr_session_stop(session_running);
     assert_int_equal(rc, SR_ERR_OK);
 
-    rc = sr_unsubscribe(subscription);
+    rc = sr_unsubscribe(NULL, subscription);
     assert_int_equal(rc, SR_ERR_OK);
 }
+
+static void
+cl_switch_ds(void **state)
+{
+    sr_conn_ctx_t *conn = *state;
+    assert_non_null(conn);
+
+    sr_session_ctx_t *session = NULL;
+    sr_val_t value = { 0, }, *val = NULL;
+    int rc = SR_ERR_OK;
+
+    /* start session */
+    rc = sr_session_start(conn, SR_DS_STARTUP, SR_SESS_DEFAULT, &session);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    /* value can be found in startup */
+    rc = sr_get_item(session, "/test-module:main/i8", &val);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_int_equal(SR_INT8_T, val->type);
+    sr_free_val(val);
+    val = NULL;
+
+    value.type = SR_INT8_T;
+    value.xpath = "/test-module:main/i8";
+    value.data.int8_val = 1;
+
+    /* modify value in startup */
+    rc = sr_set_item(session, value.xpath, &value, SR_EDIT_DEFAULT);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    rc = sr_session_switch_ds(session, SR_DS_RUNNING);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* value is not enabled in running */
+    rc = sr_get_item(session, "/test-module:main/i8", &val);
+    assert_int_equal(SR_ERR_NOT_FOUND, rc);
+
+    /* switch back to startup*/
+    rc = sr_session_switch_ds(session, SR_DS_STARTUP);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* changes made in session are in place */
+    rc = sr_get_item(session, "/test-module:main/i8", &val);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_int_equal(SR_INT8_T, val->type);
+    assert_int_equal(1, val->data.uint8_val);
+    sr_free_val(val);
+    val = NULL;
+
+    rc = sr_session_stop(session);
+    assert_int_equal(rc, SR_ERR_OK);
+
+}
+
 int
 main()
 {
@@ -1397,6 +1446,7 @@ main()
             cmocka_unit_test_setup_teardown(cl_copy_config_test, sysrepo_setup, sysrepo_teardown),
             cmocka_unit_test_setup_teardown(cl_rpc_test, sysrepo_setup, sysrepo_teardown),
             cmocka_unit_test_setup_teardown(candidate_ds_test, sysrepo_setup, sysrepo_teardown),
+            cmocka_unit_test_setup_teardown(cl_switch_ds, sysrepo_setup, sysrepo_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
