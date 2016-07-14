@@ -94,11 +94,13 @@ retrieve_current_config(sr_session_ctx_t *session)
     sr_free_values(values, count);
 }
 
-static void
-module_change_cb(sr_session_ctx_t *session, const char *module_name, void *private_ctx)
+static int
+module_change_cb(sr_session_ctx_t *session, const char *module_name, sr_notif_event_t event, void *private_ctx)
 {
     log_msg("turing-machine configuration has changed");
     retrieve_current_config(session);
+
+    return SR_ERR_OK;
 }
 
 static int
@@ -129,17 +131,20 @@ sr_plugin_init_cb(sr_session_ctx_t *session, void **private_ctx)
     sr_subscription_ctx_t *subscription = NULL;
     int rc = SR_ERR_OK;
 
-    rc = sr_module_change_subscribe(session, "turing-machine", true, module_change_cb, NULL, &subscription);
+    rc = sr_module_change_subscribe(session, "turing-machine", module_change_cb, NULL,
+            0, SR_SUBSCR_DEFAULT, &subscription);
     if (SR_ERR_OK != rc) {
         goto error;
     }
 
-    rc = sr_rpc_subscribe(session, "/turing-machine:initialize", rpc_initialize_cb, NULL, &subscription);
+    rc = sr_rpc_subscribe(session, "/turing-machine:initialize", rpc_initialize_cb, NULL,
+            SR_SUBSCR_CTX_REUSE, &subscription);
     if (SR_ERR_OK != rc) {
         goto error;
     }
 
-    rc = sr_rpc_subscribe(session, "/turing-machine:run", rpc_run_cb, NULL, &subscription);
+    rc = sr_rpc_subscribe(session, "/turing-machine:run", rpc_run_cb, NULL,
+            SR_SUBSCR_CTX_REUSE, &subscription);
     if (SR_ERR_OK != rc) {
         goto error;
     }

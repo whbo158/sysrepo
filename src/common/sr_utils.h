@@ -1,6 +1,7 @@
 /**
  * @file sr_utils.h
- * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
+ * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>,
+ *         Milan Lenco <milan.lenco@pantheon.tech>
  * @brief Sysrepo utility functions API.
  *
  * @copyright
@@ -21,10 +22,31 @@
 
 #ifndef SR_UTILS_H_
 #define SR_UTILS_H_
+#include <time.h>
+
+#ifdef __APPLE__
+/* OS X get_time */
+#include <mach/clock.h>
+#include <mach/mach.h>
+#define CLOCK_REALTIME CALENDAR_CLOCK
+#define CLOCK_MONOTONIC SYSTEM_CLOCK
+typedef int clockid_t;
+#endif
 
 #include <libyang/libyang.h>
 
 typedef struct dm_data_info_s dm_data_info_t;  /**< forward declaration */
+
+/**
+ * @brief Internal structure holding information about changes used for notifications
+ */
+typedef struct sr_change_s {
+    sr_change_oper_t oper;      /**< Performed operation */
+    struct lys_node *sch_node;  /**< Schema node used for comaparation whether the change matches the request */
+    sr_val_t *new_value;        /**< Created, modified, moved value, NULL in case of SR_OP_DELETED */
+    sr_val_t *old_value;        /**< Prev value, NULL in case of SR_OP_CREATED, predcessor in case of SR_OP_MOVED */
+}sr_change_t;
+
 
 /**
  * @defgroup utils Utility Functions
@@ -67,6 +89,13 @@ int sr_str_ends_with(const char *str, const char *suffix);
  * @return err_code
  */
 int sr_str_join(const char *str1, const char *str2, char **result);
+
+/**
+ * @brief Removes all leading and trailing white-space characters from the input string
+ * @param [in] str
+ */
+void
+sr_str_trim(char *str);
 
 /**
  * @brief Copies the first string from the beginning of the xpath up to the first colon,
@@ -233,11 +262,19 @@ int sr_lyd_insert_after(dm_data_info_t *data_info, struct lyd_node *sibling, str
 int sr_lyd_insert_before(dm_data_info_t *data_info, struct lyd_node *sibling, struct lyd_node *node);
 
 /**
- * @brief Converts libyang enum of YANG built-in types to sysrepo representation
- * @param [in] t
- * @return sr_type_t
+ * @brief Converts value type of a libyang's leaf(list) to sysrepo representation
+ * @param [in] leaf whose value type is converted
+ * @return Converted type (sr_type_t)
  */
-sr_type_t sr_libyang_type_to_sysrepo(LY_DATA_TYPE t);
+sr_type_t sr_libyang_leaf_get_type(const struct lyd_node_leaf_list *leaf);
+
+/**
+ * @brief Copies value from lyd_node_leaf_list to the sr_val_t.
+ * @param [in] leaf input which is copied
+ * @param [in] value where the content is copied to
+ * @return Error code (SR_ERR_OK on success)
+ */
+int sr_libyang_leaf_copy_value(const struct lyd_node_leaf_list *leaf, sr_val_t *value);
 
 /**
  * @brief Converts sr_val_t to string representation, used in set item
@@ -292,6 +329,13 @@ void sr_free_errors(sr_error_info_t *sr_errors, size_t sr_error_cnt);
 void sr_free_schema(sr_schema_t *schema);
 
 /**
+ * @brief Frees the changes array
+ * @param [in] changes
+ * @param [in] count
+ */
+void sr_free_changes(sr_change_t *changes, size_t count);
+
+/**
  * @brief Daemonize the process. The process will fork and PID of the original
  * (parent) process will be returned.
  *
@@ -305,12 +349,38 @@ void sr_free_schema(sr_schema_t *schema);
 pid_t sr_daemonize(bool debug_mode, int log_level, const char *pid_file, int *pid_file_fd);
 
 /**
- * @brief Send a signal notifying about initialization success to the parent of
+ * @brief Sends a signal notifying about initialization success to the parent of
  * the process forked by ::sr_daemonize.
  *
- * @param[in] PID of the parent process that is waiting for this signal.
+ * @param[in] parent_pid PID of the parent process that is waiting for this signal.
  */
 void sr_daemonize_signal_success(pid_t parent_pid);
+
+/**
+ * @brief Function calls appropriate function on OS X and other unix/linux systems
+ *
+ * @param [in] clock_id clock identifier
+ * @param [in] ts - time structure to be filled
+ *
+ * @return Error code (SR_ERR_OK on success)
+ */
+int sr_clock_get_time(clockid_t clock_id, struct timespec *ts);
+
+
+/**
+ * @brief Sets correct permissions on provided socket directory according to the
+ * data access permission of the YANG module.
+ *
+ * @param[in] socket_dir Socket directory.
+ * @param[in] data_serach_dir Location of the directory with data files.
+ * @param[in] module_name Name of the module whose access permissions are used
+ * to derive the permissions for the socket directory.
+ * @param[in] strict TRUE in no errors are allowed during the process of setting permissions,
+ * FALSE otherwise.
+ *
+ * @return Error code.
+ */
+int sr_set_socket_dir_permissions(const char *socket_dir, const char *data_serach_dir, const char *module_name, bool strict);
 
 /**@} utils */
 

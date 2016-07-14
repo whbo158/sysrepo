@@ -19,6 +19,8 @@ __license__ = "Apache 2.0"
 from random import randint
 import os, time
 import unittest
+import traceback
+import sys
 
 
 class Tester(object):
@@ -33,12 +35,17 @@ class Tester(object):
         _current_step(int) - index of the step to be executed
 
     """
-    def __init__(self):
+    def __init__(self, name=None):
+        self.name = name
         self.tc = unittest.TestCase('__init__')
         self.steps = []
 
     def setup(self):
         """Method executed before steps"""
+        pass
+
+    def cleanup(self):
+        """Method executed after steps"""
         pass
 
     def add_step(self, step, *args):
@@ -72,10 +79,12 @@ class Tester(object):
 
     def run_sync(self, done, next_step, rand_sleep, id, queue):
         """run steps in sync with other tester and inform test manager"""
+        if self.name is None:
+            self.name = id
         #empty steps check
         if len(self.steps) == 0:
             next_step.acquire()
-            queue.put((id, False))
+            queue.put((id, self.name, False))
             done.release()
 
         for step in range(len(self.steps)):
@@ -83,21 +92,24 @@ class Tester(object):
             next_step.acquire()
             if rand_sleep:
                 time.sleep(randint(1,1000)*0.00001)
-            self.print_with_lock('Step: ', step, ", pid: ", os.getpid())
+            #self.print_with_lock('Step: ', step, ", pid: ", os.getpid())
 
             try:
                 self.execute_step(step)
             except Exception as e:
+                _, _, tb = sys.exc_info()
+                traceback.print_tb(tb) # Print traceback
+                print >> sys.stderr, "\n\n"
                 err = e
             finally:
                 self._current_step += 1
                 #report to test manager if there is any step left
                 if err is not None:
-                    queue.put((id, err))
+                    queue.put((id, self.name, err))
                 elif self.has_next():
-                    queue.put((id, True))
+                    queue.put((id, self.name, True))
                 else:
-                    queue.put((id, False))
+                    queue.put((id, self.name, False))
                 done.release()
 
     def run_without_sync(self):
@@ -128,6 +140,8 @@ class Tester(object):
             self.run_sync(done, next_step, rand_sleep, id, queue)
         else:
             self.run_without_sync()
+
+        self.cleanup()
 
     def waitStep(self):
         """Step that can be used by tester, to do nothing"""

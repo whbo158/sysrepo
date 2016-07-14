@@ -63,19 +63,31 @@ typedef struct rp_dt_get_items_ctx {
 } rp_dt_get_items_ctx_t;
 
 /**
+ * @brief Cache structure that holds of the last get_changes_iter call
+ */
+typedef struct rp_dt_change_ctx_s {
+    char *xpath;                        /* xpath used for change identification */
+    const struct lys_node *schema_node; /* schema node corresponding to xpath, used for matching */
+    size_t offset;                      /* offset-th matched change to be returned */
+    size_t position;                    /* index to the change set */
+} rp_dt_change_ctx_t;
+
+/**
  * @brief Structure that holds Request Processor's per-session context.
  */
 typedef struct rp_session_s {
     uint32_t id;                         /**< Assigned session id. */
     const ac_ucred_t *user_credentials;  /**< Credentials of the user who the session belongs to. */
     sr_datastore_t datastore;            /**< Datastore selected for this session. */
-    uint32_t options;                   /**< Session options used to override default session behavior. */
+    uint32_t options;                    /**< Session options used to override default session behavior. */
+    uint32_t commit_id;                  /**< Commit ID in case that this is a notification session. */
     uint32_t msg_count;                  /**< Count of unprocessed messages (including waiting in queue). */
     pthread_mutex_t msg_count_mutex;     /**< Mutex for msg_count counter. */
     bool stop_requested;                 /**< Session stop has been requested. */
     ac_session_t *ac_session;            /**< Access Control module's session context. */
     dm_session_t *dm_session;            /**< Data Manager's session context. */
     rp_dt_get_items_ctx_t get_items_ctx; /**< Context for get_items_iter calls. */
+    rp_dt_change_ctx_t change_ctx;
 } rp_session_t;
 
 #endif /* RP_INTERNAL_H_ */

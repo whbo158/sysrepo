@@ -56,8 +56,10 @@ ADD_UNIT_TEST(common_test 0)
 ADD_UNIT_TEST(ac_test 1)
 
 ADD_UNIT_TEST(cm_sm_test 0)
-ADD_UNIT_TEST_WITH_OPTS(np_test 1 1 "cm_msg_send")
-ADD_UNIT_TEST_WITH_OPTS(pm_test 1 1 "cm_msg_send")
+IF (NOT ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+    ADD_UNIT_TEST_WITH_OPTS(np_test 1 1 "cm_msg_send")
+    ADD_UNIT_TEST_WITH_OPTS(pm_test 1 1 "cm_msg_send")
+ENDIF()
 
 ADD_UNIT_TEST(dm_test 1)
 
@@ -74,11 +76,20 @@ if("${TEST_REPOSITORY_LOC}" STREQUAL "${REPOSITORY_LOC}")
     ADD_UNIT_TEST(rp_test 0)
     
     ADD_UNIT_TEST(cl_test 1)
+    ADD_UNIT_TEST(cl_notifications_test 1)
     ADD_UNIT_TEST(concurr_test 1)
     ADD_UNIT_TEST_WITH_OPTS(perf_test 1 0 "")
     ADD_UNIT_TEST_WITH_OPTS(daemon_test 0 0 "")
     ADD_UNIT_TEST_WITH_OPTS(plugin_daemon_test 0 0 "")
     ADD_UNIT_TEST_WITH_OPTS(sysrepoctl_test 1 0 "")
+    ADD_UNIT_TEST_WITH_OPTS(sysrepocfg_test 1 0 "")
+
+    ADD_CUSTOM_COMMAND(
+        TARGET sysrepocfg_test
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/sysrepocfg_test_editor.sh ${CMAKE_CURRENT_BINARY_DIR}
+        VERBATIM
+    )
 
     # Python tests
     FIND_PACKAGE(PythonInterp)
@@ -98,12 +109,15 @@ if("${TEST_REPOSITORY_LOC}" STREQUAL "${REPOSITORY_LOC}")
         ADD_PYTHON_TEST(CommitTest)
         ADD_PYTHON_TEST(MoveTest)
         ADD_PYTHON_TEST(SubscriptionTest)
+        ADD_PYTHON_TEST(NotificationTest)
         ADD_PYTHON_TEST(PerfTest)
     endif()
     add_executable(measure_perf measure_performance.c ${TEST_HELPERS_DIR}test_module_helper.c)
     target_link_libraries(measure_perf ${CMOCKA_LIBRARIES} sysrepo_a)
     add_executable(subscription_test_app subscription_test_app.c)
     target_link_libraries(subscription_test_app ${CMOCKA_LIBRARIES} sysrepo_a)
+    add_executable(notifications_test_app notifications_test_app.c)
+    target_link_libraries(notifications_test_app ${CMOCKA_LIBRARIES} sysrepo_a)
 
 else()
     message(STATUS "Test repostory location differs to system repository location, some tests will be disabled.")

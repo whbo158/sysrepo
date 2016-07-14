@@ -155,7 +155,7 @@ cm_server_init(cm_ctx_t *cm_ctx, const char *socket_path)
 
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (-1 == fd){
-        SR_LOG_ERR("Socket create error: %s", strerror(errno));
+        SR_LOG_ERR("Socket create error: %s", sr_strerror_safe(errno));
         rc = SR_ERR_INIT_FAILED;
         goto cleanup;
     }
@@ -184,14 +184,14 @@ cm_server_init(cm_ctx_t *cm_ctx, const char *socket_path)
     umask(old_umask);
 
     if (-1 == rc) {
-        SR_LOG_ERR("Socket bind error: %s", strerror(errno));
+        SR_LOG_ERR("Socket bind error: %s", sr_strerror_safe(errno));
         rc = SR_ERR_INIT_FAILED;
         goto cleanup;
     }
 
     rc = listen(fd, SOMAXCONN);
     if (-1 == rc) {
-        SR_LOG_ERR("Socket listen error: %s", strerror(errno));
+        SR_LOG_ERR("Socket listen error: %s", sr_strerror_safe(errno));
         rc = SR_ERR_INIT_FAILED;
         goto cleanup;
     }
@@ -296,7 +296,7 @@ cm_delayed_request_cb(struct ev_loop *loop, ev_timer *w, int revents)
 }
 
 /**
- * @brief Sends a request to to the Request Processor after some timeout.
+ * @brief Sends a message to the Request Processor after specified timeout.
  */
 static int
 cm_delayed_msg_process(cm_ctx_t *cm_ctx, cm_session_ctx_t *session, Sr__Msg *msg, double timeout)
@@ -497,7 +497,7 @@ cm_conn_out_buff_flush(cm_ctx_t *cm_ctx, sm_connection_t *connection)
                 break;
             } else {
                 /* error by writing - close the connection due to an error */
-                SR_LOG_ERR("Error by writing data to fd %d: %s.", connection->fd, strerror(errno));
+                SR_LOG_ERR("Error by writing data to fd %d: %s.", connection->fd, sr_strerror_safe(errno));
                 connection->close_requested = true;
                 break;
             }
@@ -561,7 +561,7 @@ cm_msg_send_connection(cm_ctx_t *cm_ctx, sm_connection_t *connection, Sr__Msg *m
  */
 static int
 cm_session_start_internal(cm_ctx_t *cm_ctx, sm_connection_t *conn, const char *effective_user,
-        sr_datastore_t datastore, uint32_t session_options, sm_session_t **session_p)
+        sr_datastore_t datastore, uint32_t session_options, uint32_t commit_id, sm_session_t **session_p)
 {
     sm_session_t *session = NULL;
     int rc = SR_ERR_OK;
@@ -596,7 +596,7 @@ cm_session_start_internal(cm_ctx_t *cm_ctx, sm_connection_t *conn, const char *e
     /* start session in Request Processor */
     if (SR_ERR_OK == rc) {
         rc = rp_session_start(cm_ctx->rp_ctx,  session->id, &session->credentials,  datastore,
-                session_options, &session->cm_data->rp_session);
+                session_options, commit_id, &session->cm_data->rp_session);
         if (SR_ERR_OK != rc) {
             SR_LOG_ERR("Cannot start Request Processor session (conn=%p).", (void*)conn);
         }
@@ -635,7 +635,9 @@ cm_session_start_req_process(cm_ctx_t *cm_ctx, sm_connection_t *conn, Sr__Msg *m
     /* start the session */
     rc = cm_session_start_internal(cm_ctx, conn, msg_in->request->session_start_req->user_name,
             sr_datastore_gpb_to_sr(msg_in->request->session_start_req->datastore),
-            msg_in->request->session_start_req->options, &session);
+            msg_in->request->session_start_req->options,
+            (msg_in->request->session_start_req->has_commit_id ? msg_in->request->session_start_req->commit_id : 0),
+            &session);
 
     if (SR_ERR_OK == rc) {
         /* set the id to response */
@@ -840,6 +842,32 @@ cleanup:
 }
 
 /**
+ * @brief Processes a notification ACK message from client.
+ */
+static int
+cm_notif_ack_process(cm_ctx_t *cm_ctx, sm_connection_t *conn, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG5(cm_ctx, conn, msg, msg->notification_ack, msg->notification_ack->notif);
+
+    if (CM_AF_UNIX_SERVER != conn->type) {
+        SR_LOG_ERR("Notification ACK received from non-server connection (conn=%p).", (void*)conn);
+        rc = SR_ERR_INVAL_ARG;
+        goto cleanup;
+    }
+
+    /* forward the message to Request Processor */
+    rc = rp_msg_process(cm_ctx->rp_ctx, NULL, msg);
+
+    return rc;
+
+cleanup:
+    sr__msg__free_unpacked(msg, NULL);
+    return rc;
+}
+
+/**
  * @brief Processes a message received on connection.
  */
 static int
@@ -866,8 +894,9 @@ cm_conn_msg_process(cm_ctx_t *cm_ctx, sm_connection_t *conn, uint8_t *msg_data, 
         goto cleanup;
     }
 
-    /* find matching session (except for session_start request) */
-    if ((SR__MSG__MSG_TYPE__REQUEST != msg->type) || (SR__OPERATION__SESSION_START != msg->request->operation)) {
+    /* find matching session (except for some exceptions) */
+    if (SR__MSG__MSG_TYPE__NOTIFICATION_ACK != msg->type &&
+            ((SR__MSG__MSG_TYPE__REQUEST != msg->type) || (SR__OPERATION__SESSION_START != msg->request->operation))) {
         rc = sm_session_find_id(cm_ctx->sm_ctx, msg->session_id, &session);
         if (SR_ERR_OK != rc) {
             SR_LOG_ERR("Unable to find session context for session id=%"PRIu32" (conn=%p).",
@@ -889,6 +918,9 @@ cm_conn_msg_process(cm_ctx_t *cm_ctx, sm_connection_t *conn, uint8_t *msg_data, 
             break;
         case SR__MSG__MSG_TYPE__RESPONSE:
             rc = cm_resp_process(cm_ctx, conn, session, msg);
+            break;
+        case SR__MSG__MSG_TYPE__NOTIFICATION_ACK:
+            rc = cm_notif_ack_process(cm_ctx, conn, msg);
             break;
         default:
             SR_LOG_ERR("Unexpected message type received (session id=%"PRIu32").", session->id);
@@ -1007,7 +1039,7 @@ cm_conn_read_cb(struct ev_loop *loop, ev_io *w, int revents)
                 break;
             } else {
                 /* error by reading - close the connection due to an error */
-                SR_LOG_ERR("Error by reading data on fd %d: %s.", conn->fd, strerror(errno));
+                SR_LOG_ERR("Error by reading data on fd %d: %s.", conn->fd, sr_strerror_safe(errno));
                 conn->close_requested = true;
                 break;
             }
@@ -1145,7 +1177,7 @@ cm_server_watcher_cb(struct ev_loop *loop, ev_io *w, int revents)
                 break;
             } else {
                 /* error by accept - only log the error and skip it */
-                SR_LOG_ERR("Unexpected error by accepting new connection: %s", strerror(errno));
+                SR_LOG_ERR("Unexpected error by accepting new connection: %s", sr_strerror_safe(errno));
                 continue;
             }
         }
@@ -1166,7 +1198,7 @@ cm_subscr_conn_create(cm_ctx_t *cm_ctx, const char *socket_path, sm_connection_t
     /* prepare a socket */
     fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (-1 == fd) {
-        SR_LOG_ERR("Unable to create a new socket: %s", strerror(errno));
+        SR_LOG_ERR("Unable to create a new socket: %s", sr_strerror_safe(errno));
         return SR_ERR_INTERNAL;
     }
 
@@ -1214,7 +1246,7 @@ cm_subscr_conn_create(cm_ctx_t *cm_ctx, const char *socket_path, sm_connection_t
             rc = SR_ERR_DISCONNECT;
             goto cleanup;
         } else {
-            SR_LOG_ERR("Unable to connect to subscriber socket=%s: %s", socket_path, strerror(errno));
+            SR_LOG_ERR("Unable to connect to subscriber socket=%s: %s", socket_path, sr_strerror_safe(errno));
             rc = SR_ERR_DISCONNECT;
             goto cleanup;
         }
@@ -1343,6 +1375,28 @@ cm_out_rpc_process(cm_ctx_t *cm_ctx, Sr__Msg *msg)
 }
 
 /**
+ * @brief Processes an internal request received from Request Processor.
+ */
+static int
+cm_internal_msg_process(cm_ctx_t *cm_ctx, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG3(cm_ctx, msg, msg->internal_request);
+
+    if (msg->internal_request->has_postpone_timeout) {
+        /* schedule delivery of message with postpone timeout */
+        rc = cm_delayed_msg_process(cm_ctx, NULL, msg, msg->internal_request->postpone_timeout);
+    } else {
+        SR_LOG_WRN_MSG("Unsupported internal message received, ignoring.");
+        rc = SR_ERR_UNSUPPORTED;
+        sr__msg__free_unpacked(msg, NULL);
+    }
+
+    return rc;
+}
+
+/**
  * @brief Processes an outgoing message (message to be sent to the client library).
  */
 static int
@@ -1352,6 +1406,11 @@ cm_out_msg_process(cm_ctx_t *cm_ctx, Sr__Msg *msg)
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG2(cm_ctx, msg);
+
+    if (SR__MSG__MSG_TYPE__INTERNAL_REQUEST == msg->type) {
+        /* handle as an internal request from RP */
+        return cm_internal_msg_process(cm_ctx, msg);
+    }
 
     /* find the session */
     rc = sm_session_find_id(cm_ctx->sm_ctx, msg->session_id, &session);
@@ -1653,7 +1712,7 @@ cm_start(cm_ctx_t *cm_ctx)
         rc = pthread_create(&cm_ctx->event_loop_thread, NULL,
                 cm_event_loop_threaded, cm_ctx);
         if (0 != rc) {
-            SR_LOG_ERR("Error by creating a new thread: %s", strerror(errno));
+            SR_LOG_ERR("Error by creating a new thread: %s", sr_strerror_safe(errno));
             rc = SR_ERR_INTERNAL;
         }
     }

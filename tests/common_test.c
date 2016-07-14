@@ -25,6 +25,9 @@
 #include <sys/socket.h>
 #include <setjmp.h>
 #include <cmocka.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sys/stat.h>
 
 #include "sr_common.h"
 #include "request_processor.h"
@@ -44,6 +47,106 @@ logging_cleanup(void **state)
     sr_logger_cleanup();
 
     return 0;
+}
+
+/*
+ * Tests sysrepo linked-list DS.
+ */
+static void
+sr_llist_test(void **state)
+{
+    sr_llist_t *llist = NULL;
+    sr_llist_node_t *node = NULL;
+    size_t cnt = 0;
+    int rc = SR_ERR_OK;
+
+    rc = sr_llist_init(&llist);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    for (size_t i = 1; i <= 10; i++) {
+        rc = sr_llist_add_new(llist, (void*)i);
+        assert_int_equal(rc, SR_ERR_OK);
+    }
+
+    // rm 3
+    rc = sr_llist_rm(llist, llist->first->next->next);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    // rm 4
+    rc = sr_llist_rm(llist, llist->first->next->next);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    // rm 1
+    rc = sr_llist_rm(llist, llist->first);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    // rm 2
+    rc = sr_llist_rm(llist, llist->first);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    // rm 10
+    rc = sr_llist_rm(llist, llist->last);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    // rm 9
+    rc = sr_llist_rm(llist, llist->last);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    node = llist->first;
+    while (NULL != node) {
+        assert_in_range((size_t)node->data, 5, 8);
+        node = node->next;
+        cnt++;
+    }
+    assert_int_equal(cnt, 4);
+
+    sr_llist_cleanup(llist);
+}
+
+/*
+ * Tests sysrepo list DS.
+ */
+static void
+sr_list_test(void **state)
+{
+    sr_list_t *list = NULL;
+    int rc = SR_ERR_OK;
+
+    rc = sr_list_init(&list);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    for (size_t i = 1; i <= 100; i++) {
+        rc = sr_list_add(list, (void*)i);
+        assert_int_equal(rc, SR_ERR_OK);
+    }
+
+    rc = sr_list_rm_at(list, 50);
+    assert_int_equal(rc, SR_ERR_OK);
+    rc = sr_list_rm_at(list, 51);
+    assert_int_equal(rc, SR_ERR_OK);
+    rc = sr_list_rm_at(list, 52);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    rc = sr_list_rm(list, (void*)66);
+    assert_int_equal(rc, SR_ERR_OK);
+    rc = sr_list_rm(list, (void*)100);
+    assert_int_equal(rc, SR_ERR_OK);
+    rc = sr_list_rm(list, (void*)99);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    assert_int_equal(list->count, 94);
+    rc = sr_list_rm_at(list, 94);
+    assert_int_equal(rc, SR_ERR_INVAL_ARG);
+
+    rc = sr_list_rm(list, (void*)100);
+    assert_int_equal(rc, SR_ERR_NOT_FOUND);
+    rc = sr_list_rm(list, (void*)66);
+    assert_int_equal(rc, SR_ERR_NOT_FOUND);
+
+    rc = sr_list_rm_at(list, 100);
+    assert_int_equal(rc, SR_ERR_INVAL_ARG);
+
+    sr_list_cleanup(list);
 }
 
 /*
@@ -206,13 +309,140 @@ logger_callback_test(void **state)
     SR_LOG_INF("Testing logging callback %d, %d, %d, %s", 2, 1, 0, "GO!");
 }
 
+
+#define TESTING_FILE "/tmp/testing_file"
+#define TEST_THREAD_COUNT 5
+
+static void *
+lock_in_thread(void *ctx)
+{
+   sr_locking_set_t *lset = ctx;
+   int fd = -1;
+   int rc = SR_ERR_OK;
+
+   /* wait rand */
+   usleep(100 * (rand()%6));
+
+   /* lock blocking */
+   rc = sr_locking_set_lock_file_open(lset, TESTING_FILE, true, true, &fd);
+   assert_int_equal(rc, SR_ERR_OK);
+
+   /* wait rand */
+   usleep(100 * (rand()%10));
+
+   /* unlock */
+   sr_locking_set_unlock_close_file(lset, TESTING_FILE);
+
+   return NULL;
+}
+
+static void
+sr_locking_set_test(void **state)
+{
+
+    sr_locking_set_t *lset = NULL;
+    int rc = SR_ERR_OK;
+    int fd = -1, fd2 =-1;
+    pthread_t threads[TEST_THREAD_COUNT] = {0};
+
+    rc = sr_locking_set_init(&lset);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    unlink(TESTING_FILE);
+
+    /* lock by file name nonblocking */
+    rc = sr_locking_set_lock_file_open(lset, TESTING_FILE, true, false, &fd);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* locking already locked resources should fail */
+    rc = sr_locking_set_lock_file_open(lset, TESTING_FILE, true, false, &fd);
+    assert_int_equal(SR_ERR_LOCKED, rc);
+
+    /* unlock by filename */
+    rc = sr_locking_set_unlock_close_file(lset, TESTING_FILE);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* unlocking of unlocked file*/
+    rc = sr_locking_set_unlock_close_file(lset, TESTING_FILE);
+    assert_int_equal(SR_ERR_INVAL_ARG, rc);
+
+    /*************************************/
+
+    /* lock by fd nonblocking */
+    fd = open(TESTING_FILE, O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    assert_int_not_equal(-1, fd);
+
+    rc = sr_locking_set_lock_fd(lset, fd, TESTING_FILE, true, false);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    fd2 = open(TESTING_FILE, O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    assert_int_not_equal(-1, fd2);
+
+    rc = sr_locking_set_lock_fd(lset, fd2, TESTING_FILE, true, false);
+    assert_int_equal(rc, SR_ERR_LOCKED);
+
+    /* unlock by fd */
+
+    rc = sr_locking_set_unlock_close_fd(lset, fd);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    rc = sr_locking_set_lock_fd(lset, fd2, TESTING_FILE, true, false);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    rc = sr_locking_set_unlock_close_fd(lset, fd2);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    /*************************************/
+
+    /* lock by file name nonblocking */
+    rc = sr_locking_set_lock_file_open(lset, TESTING_FILE, true, false, &fd);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* unlock by fd */
+    rc = sr_locking_set_unlock_close_fd(lset, fd);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /*************************************/
+
+    /* lock by fd nonblocking */
+    fd = open(TESTING_FILE, O_RDWR, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+    assert_int_not_equal(-1, fd);
+
+    rc = sr_locking_set_lock_fd(lset, fd, TESTING_FILE, true, false);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    /* unlock by filename */
+    rc = sr_locking_set_unlock_close_file(lset, TESTING_FILE);
+    assert_int_equal(rc, SR_ERR_OK);
+
+    sr_locking_set_cleanup(lset);
+
+    /*************************************/
+
+    rc = sr_locking_set_init(&lset);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+        pthread_create(&threads[i], NULL, lock_in_thread, lset);
+    }
+
+    for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    sr_locking_set_cleanup(lset);
+}
+
 int
 main() {
     const struct CMUnitTest tests[] = {
+            cmocka_unit_test_setup_teardown(sr_llist_test, logging_setup, logging_cleanup),
+            cmocka_unit_test_setup_teardown(sr_list_test, logging_setup, logging_cleanup),
             cmocka_unit_test_setup_teardown(circular_buffer_test1, logging_setup, logging_cleanup),
             cmocka_unit_test_setup_teardown(circular_buffer_test2, logging_setup, logging_cleanup),
             cmocka_unit_test_setup_teardown(circular_buffer_test3, logging_setup, logging_cleanup),
             cmocka_unit_test_setup_teardown(logger_callback_test, logging_setup, logging_cleanup),
+            cmocka_unit_test_setup_teardown(sr_locking_set_test, logging_setup, logging_cleanup),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

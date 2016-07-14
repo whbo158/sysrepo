@@ -1,6 +1,7 @@
 /**
  * @file request_processor.c
- * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
+ * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>,
+ *         Milan Lenco <milan.lenco@pantheon.tech>
  * @brief Implementation of Sysrepo's Request Processor.
  *
  * @copyright
@@ -72,6 +73,53 @@ rp_resp_fill_errors(Sr__Msg *msg, dm_session_t *dm_session)
     }
     sr__error__init(msg->response->error);
     rc = dm_copy_errors(dm_session, &msg->response->error->message, &msg->response->error->xpath);
+    return rc;
+}
+
+/**
+ * @brief Verifies that the requested commit context still exists. Copies data tree from commit context to the session if
+ * needed.
+ */
+static int
+rp_check_notif_session(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+    dm_commit_context_t *c_ctx = NULL;
+    char *module_name = NULL;
+    const char *xpath = NULL;
+    dm_commit_ctxs_t *dm_ctxs = NULL;
+    uint32_t id = session->commit_id;
+
+    rc = dm_get_commit_ctxs(rp_ctx->dm_ctx, &dm_ctxs);
+    CHECK_RC_MSG_RETURN(rc, "Get commit ctx failed");
+    pthread_rwlock_rdlock(&dm_ctxs->lock);
+
+    rc = dm_get_commit_context(rp_ctx->dm_ctx, id, &c_ctx);
+    CHECK_RC_MSG_GOTO(rc, cleanup, "Get commit context failed");
+    if (NULL == c_ctx) {
+        SR_LOG_ERR("Commit context with id %d can not be found", id);
+        dm_report_error(session->dm_session, "Commit data are not available anymore", NULL, SR_ERR_INTERNAL);
+        goto cleanup;
+    }
+
+    if (SR__OPERATION__GET_ITEM == msg->request->operation) {
+        xpath = msg->request->get_item_req->xpath;
+    } else if (SR__OPERATION__GET_ITEMS == msg->request->operation) {
+        xpath = msg->request->get_items_req->xpath;
+    } else if (SR__OPERATION__GET_CHANGES == msg->request->operation) {
+        xpath = msg->request->get_changes_req->xpath;
+    } else {
+        SR_LOG_WRN_MSG("Check notif session called for unknown operation");
+    }
+
+    rc = sr_copy_first_ns(xpath, &module_name);
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Copy first ns failed for xpath %s", xpath);
+
+    /* copy requested model from commit context */
+    rc = dm_copy_if_not_loaded(rp_ctx->dm_ctx,  c_ctx->session, session->dm_session, module_name);
+    free(module_name);
+cleanup:
+    pthread_rwlock_unlock(&dm_ctxs->lock);
     return rc;
 }
 
@@ -275,12 +323,15 @@ rp_get_item_req_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
     sr_val_t *value = NULL;
     char *xpath = msg->request->get_item_req->xpath;
 
+    if (session->options & SR__SESSION_FLAGS__SESS_NOTIFICATION) {
+        rc = rp_check_notif_session(rp_ctx, session, msg);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Check notif session failed");
+    }
+
     /* get value from data manager */
     rc = rp_dt_get_value_wrapper(rp_ctx, session, xpath, &value);
-    if (SR_ERR_OK != rc) {
-        if (SR_ERR_NOT_FOUND != rc) {
-            SR_LOG_ERR("Get item failed for '%s', session id=%"PRIu32".", xpath, session->id);
-        }
+    if (SR_ERR_OK != rc && SR_ERR_NOT_FOUND != rc) {
+        SR_LOG_ERR("Get item failed for '%s', session id=%"PRIu32".", xpath, session->id);
     }
 
     /* copy value to gpb */
@@ -291,6 +342,7 @@ rp_get_item_req_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
         }
     }
 
+cleanup:
     /* set response code */
     resp->response->result = rc;
 
@@ -326,6 +378,11 @@ rp_get_items_req_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR_MSG("Memory allocation failed");
         return SR_ERR_NOMEM;
+    }
+
+    if (session->options & SR__SESSION_FLAGS__SESS_NOTIFICATION) {
+        rc = rp_check_notif_session(rp_ctx, session, msg);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Check notif session failed");
     }
 
     xpath = msg->request->get_items_req->xpath;
@@ -841,17 +898,20 @@ rp_subscribe_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, Sr
     subscribe_req = msg->request->subscribe_req;
 
     /* set subscribe options */
-    if (subscribe_req->enable_running) {
+    if (subscribe_req->has_enable_running && subscribe_req->enable_running) {
         options |= NP_SUBSCR_ENABLE_RUNNING;
     }
-    if (SR__NOTIFICATION_EVENT__RPC_EV == subscribe_req->event) {
+    if (SR__SUBSCRIPTION_TYPE__RPC_SUBS == subscribe_req->type) {
         options |= NP_SUBSCR_EXCLUSIVE;
     }
 
     /* subscribe to the notification */
-    rc = np_notification_subscribe(rp_ctx->np_ctx, session, subscribe_req->event,
+    rc = np_notification_subscribe(rp_ctx->np_ctx, session, subscribe_req->type,
             subscribe_req->destination, subscribe_req->subscription_id,
-            subscribe_req->module_name, subscribe_req->xpath, options);
+            subscribe_req->module_name, subscribe_req->xpath,
+            (subscribe_req->has_notif_event ? subscribe_req->notif_event : SR__NOTIFICATION_EVENT__NOTIFY_EV),
+            (subscribe_req->has_priority ? subscribe_req->priority : 0),
+            options);
 
     /* set response code */
     resp->response->result = rc;
@@ -894,7 +954,7 @@ rp_unsubscribe_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, 
     }
 
     /* unsubscribe from the notifications */
-    rc = np_notification_unsubscribe(rp_ctx->np_ctx, session, msg->request->unsubscribe_req->event,
+    rc = np_notification_unsubscribe(rp_ctx->np_ctx, session, msg->request->unsubscribe_req->type,
             msg->request->unsubscribe_req->destination, msg->request->unsubscribe_req->subscription_id,
             msg->request->unsubscribe_req->module_name);
 
@@ -909,6 +969,129 @@ rp_unsubscribe_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, 
     /* send the response */
     rc = cm_msg_send(rp_ctx->cm_ctx, resp);
 
+    return rc;
+}
+
+/**
+ * @brief Processes a check-enabled-running request.
+ */
+static int
+rp_check_enabled_running_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, Sr__Msg *msg)
+{
+    Sr__Msg *resp = NULL;
+    int rc = SR_ERR_OK;
+    bool enabled = false;
+
+    CHECK_NULL_ARG5(rp_ctx, session, msg, msg->request, msg->request->check_enabled_running_req);
+
+    SR_LOG_DBG_MSG("Processing check-enabled-running request.");
+
+    /* allocate the response */
+    rc = sr_gpb_resp_alloc(SR__OPERATION__CHECK_ENABLED_RUNNING, session->id, &resp);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Allocation of check-enabled-running response failed.");
+        return SR_ERR_NOMEM;
+    }
+
+    /* query data manager */
+    rc = dm_has_enabled_subtree(rp_ctx->dm_ctx, msg->request->check_enabled_running_req->module_name, NULL, &enabled);
+    if (SR_ERR_OK == rc) {
+        resp->response->check_enabled_running_resp->enabled = enabled;
+    }
+
+    /* set response code */
+    resp->response->result = rc;
+
+    /* copy DM errors, if any */
+    rc = rp_resp_fill_errors(resp, session->dm_session);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Copying errors to gpb failed");
+    }
+
+    /* send the response */
+    rc = cm_msg_send(rp_ctx->cm_ctx, resp);
+    return rc;
+}
+
+/**
+ * @brief Process get changes request.
+ */
+static int
+rp_get_changes_req_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
+{
+    Sr__Msg *resp = NULL;
+    int rc = SR_ERR_OK;
+    dm_commit_ctxs_t *dm_ctxs = NULL;
+    dm_commit_context_t *c_ctx = NULL;
+    sr_list_t *changes = NULL;
+    bool locked = false;
+
+    CHECK_NULL_ARG5(rp_ctx, session, msg, msg->request, msg->request->get_changes_req);
+    SR_LOG_DBG_MSG("Processing get changes request.");
+
+    /* allocate the response */
+    rc = sr_gpb_resp_alloc(SR__OPERATION__GET_CHANGES, session->id, &resp);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Allocation of get changes response failed.");
+        return SR_ERR_NOMEM;
+    }
+
+    char *xpath = msg->request->get_changes_req->xpath;
+
+    uint32_t id = session->commit_id;
+
+    if (session->options & SR__SESSION_FLAGS__SESS_NOTIFICATION) {
+        rc = rp_check_notif_session(rp_ctx, session, msg);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Check notif session failed");
+    } else {
+        rc = dm_report_error(session->dm_session, "Get changes call can be issued only on notification session", NULL, SR_ERR_UNSUPPORTED);
+        goto cleanup;
+    }
+
+    rc = dm_get_commit_ctxs(rp_ctx->dm_ctx, &dm_ctxs);
+    CHECK_RC_MSG_GOTO(rc, cleanup, "Get commit ctx failed");
+    pthread_rwlock_rdlock(&dm_ctxs->lock);
+    locked = true;
+
+    rc = dm_get_commit_context(rp_ctx->dm_ctx, id, &c_ctx);
+    CHECK_RC_MSG_GOTO(rc, cleanup, "Get commit context failed");
+    if (NULL == c_ctx) {
+        SR_LOG_ERR("Commit context with id %d can not be found", id);
+        dm_report_error(session->dm_session, "Commit data are not available anymore", NULL, SR_ERR_INTERNAL);
+        goto cleanup;
+    }
+
+    /* get changes */
+    rc = rp_dt_get_changes(rp_ctx, session, c_ctx, xpath,
+            msg->request->get_changes_req->offset,
+            msg->request->get_changes_req->limit,
+            &changes);
+
+    if (SR_ERR_OK == rc) {
+        /* copy values to gpb */
+        rc = sr_changes_sr_to_gpb(changes, &resp->response->get_changes_resp->changes, &resp->response->get_changes_resp->n_changes);
+        if (SR_ERR_OK != rc) {
+            SR_LOG_ERR_MSG("Copying values to GPB failed.");
+        }
+    }
+
+cleanup:
+    if (locked) {
+        pthread_rwlock_unlock(&dm_ctxs->lock);
+    }
+
+    /* set response code */
+    resp->response->result = rc;
+
+    rc = rp_resp_fill_errors(resp, session->dm_session);
+    if (SR_ERR_OK != rc) {
+        SR_LOG_ERR_MSG("Copying errors to gpb failed");
+    }
+
+    /* send the response */
+    rc = cm_msg_send(rp_ctx->cm_ctx, resp);
+
+    sr_list_cleanup(changes);
     return rc;
 }
 
@@ -969,20 +1152,28 @@ rp_rpc_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, Sr__Msg 
 
     /* get RPC subscription */
     if (SR_ERR_OK == rc) {
-        rc = pm_get_subscriptions(rp_ctx->pm_ctx, module_name, SR__NOTIFICATION_EVENT__RPC_EV,
+        rc = pm_get_subscriptions(rp_ctx->pm_ctx, module_name, SR__SUBSCRIPTION_TYPE__RPC_SUBS,
                 &subscriptions, &subscription_cnt);
     }
     free(module_name);
 
     /* fill-in subscription details into the request */
-    if (subscription_cnt > 0) {
-        req->request->rpc_req->subscriber_address = (char*)subscriptions[0].dst_address; /* copied to GPB - do not free */
-        req->request->rpc_req->subscription_id = subscriptions[0].dst_id;
-        req->request->rpc_req->has_subscription_id = true;
-        req->request->rpc_req->session_id = session->id;
-        req->request->rpc_req->has_session_id = true;
-        free(subscriptions);
-    } else if (SR_ERR_OK == rc) {
+    bool subscription_match = false;
+    for (size_t i = 0; i < subscription_cnt; i++) {
+        if (NULL != subscriptions[i].xpath && 0 == strcmp(subscriptions[i].xpath, req->request->rpc_req->xpath)) {
+            req->request->rpc_req->subscriber_address = strdup(subscriptions[i].dst_address);
+            CHECK_NULL_NOMEM_ERROR(req->request->rpc_req->subscriber_address, rc);
+            req->request->rpc_req->subscription_id = subscriptions[i].dst_id;
+            req->request->rpc_req->has_subscription_id = true;
+            req->request->rpc_req->session_id = session->id;
+            req->request->rpc_req->has_session_id = true;
+            np_free_subscriptions(subscriptions, subscription_cnt);
+            subscription_match = true;
+            break;
+        }
+    }
+
+    if (SR_ERR_OK == rc && !subscription_match) {
         /* no subscription for this RPC */
         SR_LOG_ERR("No subscription found for RPC delivery (xpath = '%s').", req->request->rpc_req->xpath);
         rc = SR_ERR_NOT_FOUND;
@@ -1075,7 +1266,7 @@ rp_rpc_resp_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, Sr__Msg
  * @brief Processes an unsubscribe-destination internal request.
  */
 static int
-rp_unsubscribe_destination_req_process(const rp_ctx_t *rp_ctx, const rp_session_t *session, Sr__Msg *msg)
+rp_unsubscribe_destination_req_process(const rp_ctx_t *rp_ctx, Sr__Msg *msg)
 {
     int rc = SR_ERR_OK;
 
@@ -1089,17 +1280,233 @@ rp_unsubscribe_destination_req_process(const rp_ctx_t *rp_ctx, const rp_session_
 }
 
 /**
+ * @brief Processes an commit-release internal request.
+ */
+static int
+rp_commit_release_req_process(const rp_ctx_t *rp_ctx, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(rp_ctx, msg, msg->internal_request, msg->internal_request->commit_release_req);
+
+    SR_LOG_DBG_MSG("Processing commit-release request.");
+
+    rc = np_commit_release(rp_ctx->np_ctx, msg->internal_request->commit_release_req->commit_id);
+
+    return rc;
+}
+
+/**
+ * @brief Processes an notification acknowledgment.
+ */
+static int
+rp_notification_ack_process(rp_ctx_t *rp_ctx, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(rp_ctx, msg, msg->notification_ack, msg->notification_ack->notif);
+
+    SR_LOG_DBG("Notification ACK received with result = %"PRIu32".", msg->notification_ack->result);
+
+    rc = np_commit_notification_ack(rp_ctx->np_ctx, msg->notification_ack->notif->commit_id);
+
+    return rc;
+}
+
+/**
+ * @brief Dispatches received request message.
+ */
+static int
+rp_req_dispatch(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg, bool *skip_msg_cleanup)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(rp_ctx, session, msg, skip_msg_cleanup);
+
+    *skip_msg_cleanup = false;
+
+    dm_clear_session_errors(session->dm_session);
+
+    /* acquire lock for operation accessing data */
+    switch (msg->request->operation) {
+        case SR__OPERATION__GET_ITEM:
+        case SR__OPERATION__GET_ITEMS:
+        case SR__OPERATION__SET_ITEM:
+        case SR__OPERATION__DELETE_ITEM:
+        case SR__OPERATION__MOVE_ITEM:
+        case SR__OPERATION__SESSION_REFRESH:
+            pthread_rwlock_rdlock(&rp_ctx->commit_lock);
+            break;
+        case SR__OPERATION__COMMIT:
+            pthread_rwlock_wrlock(&rp_ctx->commit_lock);
+            break;
+        default:
+            break;
+    }
+
+    switch (msg->request->operation) {
+        case SR__OPERATION__SESSION_SWITCH_DS:
+            rc = rp_switch_datastore_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__LIST_SCHEMAS:
+            rc = rp_list_schemas_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__GET_SCHEMA:
+            rc = rp_get_schema_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__MODULE_INSTALL:
+            rc = rp_module_install_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__FEATURE_ENABLE:
+            rc = rp_feature_enable_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__GET_ITEM:
+            rc = rp_get_item_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__GET_ITEMS:
+            rc = rp_get_items_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__SET_ITEM:
+            rc = rp_set_item_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__DELETE_ITEM:
+            rc = rp_delete_item_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__MOVE_ITEM:
+            rc = rp_move_item_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__VALIDATE:
+            rc = rp_validate_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__COMMIT:
+            rc = rp_commit_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__DISCARD_CHANGES:
+            rc = rp_discard_changes_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__COPY_CONFIG:
+            rc = rp_copy_config_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__SESSION_REFRESH:
+            rc = rp_session_refresh_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__LOCK:
+            rc = rp_lock_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__UNLOCK:
+            rc = rp_unlock_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__SUBSCRIBE:
+            rc = rp_subscribe_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__UNSUBSCRIBE:
+            rc = rp_unsubscribe_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__CHECK_ENABLED_RUNNING:
+            rc = rp_check_enabled_running_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__GET_CHANGES:
+            rc = rp_get_changes_req_process(rp_ctx, session, msg);
+            break;
+        case SR__OPERATION__RPC:
+            rc = rp_rpc_req_process(rp_ctx, session, msg);
+            *skip_msg_cleanup = true;
+            return rc; /* skip further processing */
+            break;
+        default:
+            SR_LOG_ERR("Unsupported request received (session id=%"PRIu32", operation=%d).",
+                    session->id, msg->request->operation);
+            rc = SR_ERR_UNSUPPORTED;
+            break;
+    }
+
+    /* release lock*/
+    switch (msg->request->operation) {
+        case SR__OPERATION__GET_ITEM:
+        case SR__OPERATION__GET_ITEMS:
+        case SR__OPERATION__SET_ITEM:
+        case SR__OPERATION__DELETE_ITEM:
+        case SR__OPERATION__MOVE_ITEM:
+        case SR__OPERATION__SESSION_REFRESH:
+        case SR__OPERATION__COMMIT:
+            pthread_rwlock_unlock(&rp_ctx->commit_lock);
+            break;
+        default:
+            break;
+    }
+
+    return rc;
+}
+
+/**
+ * @brief Dispatches received response message.
+ */
+static int
+rp_resp_dispatch(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg, bool *skip_msg_cleanup)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG4(rp_ctx, session, msg, skip_msg_cleanup);
+
+    *skip_msg_cleanup = false;
+
+    switch (msg->response->operation) {
+        case SR__OPERATION__RPC:
+            rc = rp_rpc_resp_process(rp_ctx, session, msg);
+            *skip_msg_cleanup = true;
+            return rc; /* skip further processing */
+            break;
+        default:
+            SR_LOG_ERR("Unsupported response received (session id=%"PRIu32", operation=%d).",
+                    session->id, msg->response->operation);
+            rc = SR_ERR_UNSUPPORTED;
+            break;
+    }
+
+    return rc;
+}
+
+/**
+ * @brief Dispatches received internal request message.
+ */
+static int
+rp_internal_req_dispatch(rp_ctx_t *rp_ctx, Sr__Msg *msg)
+{
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(rp_ctx, msg);
+
+    switch (msg->internal_request->operation) {
+        case SR__OPERATION__UNSUBSCRIBE_DESTINATION:
+            rc = rp_unsubscribe_destination_req_process(rp_ctx, msg);
+            break;
+        case SR__OPERATION__COMMIT_RELEASE:
+            rc = rp_commit_release_req_process(rp_ctx, msg);
+            break;
+        default:
+            SR_LOG_ERR("Unsupported internal request received (operation=%d).", msg->internal_request->operation);
+            rc = SR_ERR_UNSUPPORTED;
+            break;
+    }
+
+    return rc;
+}
+
+/**
  * @brief Dispatches the received message.
  */
 static int
 rp_msg_dispatch(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
 {
     int rc = SR_ERR_OK;
+    bool skip_msg_cleanup = false;
 
     CHECK_NULL_ARG2(rp_ctx, msg);
 
     /* NULL session is only allowed for internal messages */
-    if ((NULL == session) && (SR__MSG__MSG_TYPE__INTERNAL_REQUEST != msg->type)) {
+    if ((NULL == session) &&
+            (SR__MSG__MSG_TYPE__INTERNAL_REQUEST != msg->type) &&
+            (SR__MSG__MSG_TYPE__NOTIFICATION_ACK != msg->type)) {
         SR_LOG_ERR("Session argument of the message  to be processed is NULL (type=%d).", msg->type);
         sr__msg__free_unpacked(msg, NULL);
         return SR_ERR_INVAL_ARG;
@@ -1110,6 +1517,7 @@ rp_msg_dispatch(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
         if ((SR__OPERATION__GET_ITEM != msg->request->operation) &&
                 (SR__OPERATION__GET_ITEMS != msg->request->operation) &&
                 (SR__OPERATION__SESSION_REFRESH != msg->request->operation) &&
+                (SR__OPERATION__GET_CHANGES != msg->request->operation) &&
                 (SR__OPERATION__UNSUBSCRIBE != msg->request->operation)) {
             SR_LOG_ERR("Unsupported operation for notification session (session id=%"PRIu32", operation=%d).",
                     session->id, msg->request->operation);
@@ -1118,142 +1526,29 @@ rp_msg_dispatch(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
         }
     }
 
-    if (SR__MSG__MSG_TYPE__REQUEST == msg->type) {
-        /* request handling */
-
-        dm_clear_session_errors(session->dm_session);
-        /* acquire lock for operation accessing data */
-        switch (msg->request->operation) {
-            case SR__OPERATION__GET_ITEM:
-            case SR__OPERATION__GET_ITEMS:
-            case SR__OPERATION__SET_ITEM:
-            case SR__OPERATION__DELETE_ITEM:
-            case SR__OPERATION__MOVE_ITEM:
-            case SR__OPERATION__SESSION_REFRESH:
-                pthread_rwlock_rdlock(&rp_ctx->commit_lock);
-                break;
-            case SR__OPERATION__COMMIT:
-                pthread_rwlock_wrlock(&rp_ctx->commit_lock);
-                break;
-            default:
-                break;
-        }
-
-        switch (msg->request->operation) {
-            case SR__OPERATION__SESSION_SWITCH_DS:
-                rc = rp_switch_datastore_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__LIST_SCHEMAS:
-                rc = rp_list_schemas_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__GET_SCHEMA:
-                rc = rp_get_schema_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__MODULE_INSTALL:
-                rc = rp_module_install_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__FEATURE_ENABLE:
-                rc = rp_feature_enable_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__GET_ITEM:
-                rc = rp_get_item_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__GET_ITEMS:
-                rc = rp_get_items_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__SET_ITEM:
-                rc = rp_set_item_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__DELETE_ITEM:
-                rc = rp_delete_item_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__MOVE_ITEM:
-                rc = rp_move_item_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__VALIDATE:
-                rc = rp_validate_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__COMMIT:
-                rc = rp_commit_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__DISCARD_CHANGES:
-                rc = rp_discard_changes_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__COPY_CONFIG:
-                rc = rp_copy_config_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__SESSION_REFRESH:
-                rc = rp_session_refresh_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__LOCK:
-                rc = rp_lock_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__UNLOCK:
-                rc = rp_unlock_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__SUBSCRIBE:
-                rc = rp_subscribe_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__UNSUBSCRIBE:
-                rc = rp_unsubscribe_req_process(rp_ctx, session, msg);
-                break;
-            case SR__OPERATION__RPC:
-                rc = rp_rpc_req_process(rp_ctx, session, msg);
-                return rc; /* skip further processing and msg cleanup */
-                break;
-            default:
-                SR_LOG_ERR("Unsupported request received (session id=%"PRIu32", operation=%d).",
-                        session->id, msg->request->operation);
-                rc = SR_ERR_UNSUPPORTED;
-                break;
-        }
-
-        /* release lock*/
-        switch (msg->request->operation) {
-            case SR__OPERATION__GET_ITEM:
-            case SR__OPERATION__GET_ITEMS:
-            case SR__OPERATION__SET_ITEM:
-            case SR__OPERATION__DELETE_ITEM:
-            case SR__OPERATION__MOVE_ITEM:
-            case SR__OPERATION__SESSION_REFRESH:
-            case SR__OPERATION__COMMIT:
-                pthread_rwlock_unlock(&rp_ctx->commit_lock);
-                break;
-            default:
-                break;
-        }
-    } else if (SR__MSG__MSG_TYPE__INTERNAL_REQUEST == msg->type) {
-        /* internal request handling */
-        switch (msg->internal_request->operation) {
-            case SR__OPERATION__UNSUBSCRIBE_DESTINATION:
-                rc = rp_unsubscribe_destination_req_process(rp_ctx, session, msg);
-                break;
-            default:
-                SR_LOG_ERR("Unsupported internal request received (operation=%d).", msg->request->operation);
-                rc = SR_ERR_UNSUPPORTED;
-                break;
-        }
-    } else if (SR__MSG__MSG_TYPE__RESPONSE == msg->type) {
-        /* response handling */
-        switch (msg->response->operation) {
-            case SR__OPERATION__RPC:
-                rc = rp_rpc_resp_process(rp_ctx, session, msg);
-                return rc; /* skip further processing and msg cleanup */
-                break;
-            default:
-                SR_LOG_ERR("Unsupported response received (session id=%"PRIu32", operation=%d).",
-                        session->id, msg->response->operation);
-                rc = SR_ERR_UNSUPPORTED;
-                break;
-        }
-    } else {
-        SR_LOG_ERR("Unsupported message received (session id=%"PRIu32", operation=%d).",
-                session->id, msg->response->operation);
-        rc = SR_ERR_UNSUPPORTED;
+    switch (msg->type) {
+        case SR__MSG__MSG_TYPE__REQUEST:
+            rc = rp_req_dispatch(rp_ctx, session, msg, &skip_msg_cleanup);
+            break;
+        case SR__MSG__MSG_TYPE__RESPONSE:
+            rc = rp_resp_dispatch(rp_ctx, session, msg, &skip_msg_cleanup);
+            break;
+        case SR__MSG__MSG_TYPE__INTERNAL_REQUEST:
+            rc = rp_internal_req_dispatch(rp_ctx, msg);
+            break;
+        case SR__MSG__MSG_TYPE__NOTIFICATION_ACK:
+            rc = rp_notification_ack_process(rp_ctx, msg);
+            break;
+        default:
+            SR_LOG_ERR("Unsupported message received (session id=%"PRIu32", operation=%d).",
+                    session->id, msg->response->operation);
+            rc = SR_ERR_UNSUPPORTED;
     }
 
     /* release the message */
-    sr__msg__free_unpacked(msg, NULL);
+    if (!skip_msg_cleanup) {
+        sr__msg__free_unpacked(msg, NULL);
+    }
 
     if (SR_ERR_OK != rc) {
         SR_LOG_WRN("Error by processing of the message: %s.", sr_strerror(rc));
@@ -1278,6 +1573,7 @@ rp_session_cleanup(const rp_ctx_t *rp_ctx, rp_session_t *session)
     ly_set_free(session->get_items_ctx.nodes);
     free(session->get_items_ctx.xpath);
     pthread_mutex_destroy(&session->msg_count_mutex);
+    free(session->change_ctx.xpath);
     free(session);
 
     return SR_ERR_OK;
@@ -1448,7 +1744,7 @@ rp_init(cm_ctx_t *cm_ctx, rp_ctx_t **rp_ctx_p)
     for (i = 0; i < RP_THREAD_COUNT; i++) {
         rc = pthread_create(&ctx->thread_pool[i], NULL, rp_worker_thread_execute, ctx);
         if (0 != rc) {
-            SR_LOG_ERR("Error by creating a new thread: %s", strerror(errno));
+            SR_LOG_ERR("Error by creating a new thread: %s", sr_strerror_safe(errno));
             for (j = 0; j < i; j++) {
                 pthread_cancel(ctx->thread_pool[j]);
             }
@@ -1515,7 +1811,7 @@ rp_cleanup(rp_ctx_t *rp_ctx)
 
 int
 rp_session_start(const rp_ctx_t *rp_ctx, const uint32_t session_id, const ac_ucred_t *user_credentials,
-        const sr_datastore_t datastore, const uint32_t session_options, rp_session_t **session_p)
+        const sr_datastore_t datastore, const uint32_t session_options, const uint32_t commit_id, rp_session_t **session_p)
 {
     rp_session_t *session = NULL;
     int rc = SR_ERR_OK;
@@ -1535,6 +1831,7 @@ rp_session_start(const rp_ctx_t *rp_ctx, const uint32_t session_id, const ac_ucr
     session->id = session_id;
     session->datastore = datastore;
     session->options = session_options;
+    session->commit_id = commit_id;
 
     rc = ac_session_init(rp_ctx->ac_ctx, user_credentials, &session->ac_session);
     if (SR_ERR_OK  != rc) {
@@ -1614,7 +1911,7 @@ rp_msg_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
     if (0 == rp_ctx->active_threads) {
         /* there is no active (non-sleeping) thread - if this is happening too
          * frequently, instruct the threads to spin before going to sleep */
-        clock_gettime(CLOCK_MONOTONIC, &now);
+        sr_clock_get_time(CLOCK_MONOTONIC, &now);
         uint64_t diff = (1000000000L * (now.tv_sec - rp_ctx->last_thread_wakeup.tv_sec)) + now.tv_nsec - rp_ctx->last_thread_wakeup.tv_nsec;
         if (diff < RP_THREAD_SPIN_TIMEOUT) {
             /* a thread has been woken up in less than RP_THREAD_SPIN_TIMEOUT, increase the spin */
@@ -1647,6 +1944,11 @@ rp_msg_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg)
     if (SR_ERR_OK != rc) {
         /* release the message by error */
         SR_LOG_ERR_MSG("Unable to process the message, skipping.");
+        if (NULL != session) {
+            pthread_mutex_lock(&session->msg_count_mutex);
+            session->msg_count -= 1;
+            pthread_mutex_unlock(&session->msg_count_mutex);
+        }
         sr__msg__free_unpacked(msg, NULL);
     }
 

@@ -4,8 +4,8 @@ set(SYSREPO_DESC "YANG-based system repository")
 
 # setup version
 set(SYSREPO_MAJOR_VERSION 0)
-set(SYSREPO_MINOR_VERSION 2)
-set(SYSREPO_MICRO_VERSION 5)
+set(SYSREPO_MINOR_VERSION 3)
+set(SYSREPO_MICRO_VERSION 4)
 set(SYSREPO_VERSION ${SYSREPO_MAJOR_VERSION}.${SYSREPO_MINOR_VERSION}.${SYSREPO_MICRO_VERSION})
 
 # set default build type if not specified by user
@@ -45,11 +45,13 @@ if(CMAKE_BUILD_TYPE_LOWER MATCHES "debug")
     set(DAEMON_PID_FILE "/tmp/sysrepod.pid" CACHE PATH "Sysrepo daemon PID file.")
     set(DAEMON_SOCKET "/tmp/sysrepod.sock" CACHE PATH "Sysrepo deamon server socket path.")
     set(PLUGIN_DAEMON_PID_FILE "/tmp/sysrepo-plugind.pid" CACHE PATH "Sysrepo plugin daemon PID file.")
+    set(SUBSCRIPTIONS_SOCKET_DIR "/tmp/sysrepo-subscriptions" CACHE PATH "Sysrepo subscriptions socket directory.")
 else()
     MESSAGE(STATUS "Preparing release build of sysrepo v. ${SYSREPO_VERSION}")
     set(DAEMON_PID_FILE "/var/run/sysrepod.pid" CACHE PATH "Sysrepo daemon PID file.")
     set(DAEMON_SOCKET "/var/run/sysrepod.sock" CACHE PATH "Sysrepo deamon server socket path.")
     set(PLUGIN_DAEMON_PID_FILE "/var/run/sysrepo-plugind.pid" CACHE PATH "Sysrepo plugin daemon PID file.")
+    set(SUBSCRIPTIONS_SOCKET_DIR "/var/run/sysrepo-subscriptions" CACHE PATH "Sysrepo subscriptions socket directory.")
 endif()
 
 # location of system repository
@@ -118,6 +120,7 @@ include(CheckStructHasMember)
 CHECK_FUNCTION_EXISTS(pthread_rwlockattr_setkind_np HAVE_PTHREAD_RWLOCKATTR_SETKIND_NP)
 CHECK_FUNCTION_EXISTS(getpeereid HAVE_GETPEEREID)
 CHECK_FUNCTION_EXISTS(getpeerucred HAVE_GETPEERUCRED)
+CHECK_FUNCTION_EXISTS(pthread_mutex_timed_lock HAVE_TIMED_LOCK)
 CHECK_INCLUDE_FILES(ucred.h HAVE_UCRED_H)
 CHECK_FUNCTION_EXISTS(setfsuid HAVE_SETFSUID)
 CHECK_STRUCT_HAS_MEMBER("struct stat" st_mtim "sys/stat.h" HAVE_STAT_ST_MTIM)
@@ -156,6 +159,9 @@ if(DOXYGEN_FOUND)
         COMMENT "Generating API documentation with Doxygen" VERBATIM
     )
 endif(DOXYGEN_FOUND)
+if(NOT MAN_INSTALL_DIR)
+    set(MAN_INSTALL_DIR share/man)
+endif()
 
 set(PYTHON_SWIG_BINDING sysrepoPy)
 set(LUA_SWIG_BINDING sysrepoLua)
@@ -208,6 +214,12 @@ install (DIRECTORY DESTINATION ${DATA_SEARCH_DIR} DIRECTORY_PERMISSIONS
     GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE)
 
+# install subscriptions socket directory
+install (DIRECTORY DESTINATION ${SUBSCRIPTIONS_SOCKET_DIR} DIRECTORY_PERMISSIONS
+    OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_WRITE GROUP_EXECUTE
+    WORLD_READ WORLD_WRITE WORLD_EXECUTE)
+
 # install plugins directory
 install(DIRECTORY DESTINATION ${PLUGINS_DIR})
 
@@ -248,4 +260,7 @@ if(PKG_CONFIG_FOUND)
     configure_file("libsysrepo.pc.in" "libsysrepo.pc" @ONLY)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libsysrepo.pc" DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig")
 endif()
+
+# install doc (man)
+install(FILES ${PROJECT_SOURCE_DIR}/doc/sysrepocfg.1 DESTINATION ${MAN_INSTALL_DIR}/man1)
 

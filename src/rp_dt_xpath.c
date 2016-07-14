@@ -295,6 +295,9 @@ rp_dt_find_in_choice(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath,
     CHECK_NULL_ARG5(dm_ctx, xpath, trimmed_xpath, module, match);
     /* libyang err_msg is used to parse the match and unmatch part */
     int rc = SR_ERR_BAD_ELEMENT;
+    /**
+     * @brief Maximum length of node name
+     */
     #define MAX_NODE_NAME_LEN 100
     char *unmatch_part = NULL;
     char *err_msg = NULL;
@@ -319,7 +322,7 @@ rp_dt_find_in_choice(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath,
     search = calloc(search_size, sizeof(*search));
     CHECK_NULL_NOMEM_GOTO(search, rc, done);
 
-    const struct lys_node *node = dm_ly_ctx_get_node(dm_ctx, module->ctx, NULL, xp_copy);
+    const struct lys_node *node = dm_ly_ctx_get_node(dm_ctx, NULL, xp_copy);
     if (NULL == node) {
         goto done;
     }
@@ -415,16 +418,20 @@ rp_dt_trim_xpath(dm_ctx_t *dm_ctx, const char *xpath, char **trimmed)
     xp_copy = strdup(xpath);
     CHECK_NULL_NOMEM_RETURN(xp_copy);
 
-    /* remove trailing '*:/' */
+    /* remove trailing '*:/.' */
     bool change = false;
     while (0 < (xp_len = strlen(xp_copy))) {
         change = false;
+        if ('.' == xp_copy[xp_len - 1]) {
+            xp_copy[xp_len - 1] = 0;
+            xp_len--;
+            change = true;
+        }
         if ('*' == xp_copy[xp_len - 1]) {
             xp_copy[xp_len - 1] = 0;
             xp_len--;
             change = true;
         }
-
         if ('/' == xp_copy[xp_len - 1]) {
             xp_copy[xp_len - 1] = 0;
             xp_len--;
@@ -502,7 +509,7 @@ rp_dt_validate_node_xpath(dm_ctx_t *dm_ctx, dm_session_t *session, const char *x
         return SR_ERR_OK;
     }
 
-    const struct lys_node *sch_node = dm_ly_ctx_get_node(dm_ctx, module->ctx, NULL, xp_copy);
+    const struct lys_node *sch_node = dm_ly_ctx_get_node(dm_ctx, NULL, xp_copy);
     if (NULL != sch_node) {
         if (NULL != match) {
             *match = (struct lys_node *) sch_node;
@@ -579,6 +586,11 @@ rp_dt_enable_xpath(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath)
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR("Xpath validation failed %s", xpath);
         return rc;
+    }
+    if (NULL == match) {
+        // TODO: XPath such as '/example-module://*' seems to return match == NULL
+        SR_LOG_ERR("Unsupported xpath '%s'", xpath);
+        return SR_ERR_UNSUPPORTED;
     }
 
     dm_schema_info_t *si = NULL;

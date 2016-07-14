@@ -41,16 +41,6 @@ class SubscriptionTester(SysrepoTester):
         os.kill(self.process.pid, signal.SIGTERM)
         self.process.wait()
 
-class SysrepodTester(SysrepoTester):
-
-    def startDaemonStep(self):
-        self.process = subprocess.Popen(["sysrepod", "-d"])
-        self.report_pid(self.process.pid)
-
-    def stopDaemonStep(self):
-        os.kill(self.process.pid, signal.SIGTERM)
-        self.process.wait()
-
 
 class SubscriptionTest(unittest.TestCase):
 
@@ -61,7 +51,7 @@ class SubscriptionTest(unittest.TestCase):
     def test_SubscribeUnsubscribe(self):
         tm = TestManager()
 
-        srd = SysrepodTester("Srd")
+        srd = SysrepodDaemonTester("Srd")
         reader = SysrepoTester("First", SR_DS_RUNNING, SR_CONN_DAEMON_REQUIRED, False)
         subscriber = SubscriptionTester("Second")
 
@@ -107,8 +97,8 @@ class SubscriptionTest(unittest.TestCase):
     def test_SubscribeKill(self):
         tm = TestManager()
 
-        srd = SysrepodTester("Srd")
-        reader = SysrepoTester("First", SR_DS_RUNNING)
+        srd = SysrepodDaemonTester("Srd")
+        reader = SysrepoTester("First", SR_DS_RUNNING, SR_CONN_DAEMON_REQUIRED, False)
         subscriber = SubscriptionTester("Second")
 
         srd.add_step(srd.startDaemonStep)

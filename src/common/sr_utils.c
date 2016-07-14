@@ -1,6 +1,7 @@
 /**
  * @file sr_utils.c
- * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
+ * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>,
+ *         Milan Lenco <milan.lenco@pantheon.tech>
  * @brief Sysrepo utility functions.
  *
  * @copyright
@@ -25,6 +26,7 @@
 #include <arpa/inet.h>
 #include <inttypes.h>
 #include <fcntl.h>
+#include <ctype.h>
 #include <signal.h>
 #include <libyang/libyang.h>
 
@@ -88,6 +90,24 @@ sr_str_join(const char *str1, const char *str2, char **result)
     strcpy(res + l1, str2);
     *result = res;
     return SR_ERR_OK;
+}
+
+void
+sr_str_trim(char *str) {
+    if (NULL == str) {
+        return;
+    }
+
+    char *ptr = str;
+    size_t len = strlen(str);
+    if (0 == len) {
+        return;
+    }
+
+    while(isspace(ptr[len - 1])) ptr[--len] = 0;
+    while(*ptr && isspace(*ptr)) ++ptr, --len;
+
+    memmove(str, ptr, len + 1);
 }
 
 int
@@ -235,7 +255,7 @@ sr_lock_fd_internal(int fd, bool lock, bool write, bool wait)
     ret = fcntl(fd, wait ? F_SETLKW : F_SETLK, &fl);
 
     if (-1 == ret) {
-        SR_LOG_WRN("Unable to acquire the lock on fd %d: %s", fd, strerror(errno));
+        SR_LOG_WRN("Unable to acquire the lock on fd %d: %s", fd, sr_strerror_safe(errno));
         if (!wait && (EAGAIN == errno || EACCES == errno)) {
             /* already locked by someone else */
             return SR_ERR_LOCKED;
@@ -266,12 +286,12 @@ sr_fd_set_nonblock(int fd)
 
     flags = fcntl(fd, F_GETFL, 0);
     if (-1 == flags) {
-        SR_LOG_WRN("Socket fcntl error (skipped): %s", strerror(errno));
+        SR_LOG_WRN("Socket fcntl error (skipped): %s", sr_strerror_safe(errno));
         flags = 0;
     }
     rc = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     if (-1 == rc) {
-        SR_LOG_ERR("Socket fcntl error: %s", strerror(errno));
+        SR_LOG_ERR("Socket fcntl error: %s", sr_strerror_safe(errno));
         return SR_ERR_INTERNAL;
     }
 
@@ -303,7 +323,7 @@ sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
     CHECK_NULL_ARG2(uid, gid);
 
     if (-1 == getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len)) {
-        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", sr_strerror_safe(errno));
         return SR_ERR_INTERNAL;
     }
     *uid = cred.uid;
@@ -326,7 +346,7 @@ sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
     CHECK_NULL_ARG2(uid, gid);
 
     if (-1 == getpeerucred(fd, &ucred)) {
-        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", sr_strerror_safe(errno));
         return SR_ERR_INTERNAL;
     }
     if (-1 == (*uid = ucred_geteuid(ucred))) {
@@ -355,7 +375,7 @@ sr_get_peer_eid(int fd, uid_t *uid, gid_t *gid)
 
     ret = getpeereid(fd, uid, gid);
     if (-1 == ret) {
-        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", strerror(errno));
+        SR_LOG_ERR("Cannot retrieve credentials of the UNIX-domain peer: %s", sr_strerror_safe(errno));
         return SR_ERR_INTERNAL;
     } else {
         return SR_ERR_OK;
@@ -459,9 +479,10 @@ sr_lyd_insert_after(dm_data_info_t *data_info, struct lyd_node *sibling, struct 
 }
 
 sr_type_t
-sr_libyang_type_to_sysrepo(LY_DATA_TYPE t)
+sr_libyang_leaf_get_type(const struct lyd_node_leaf_list *leaf)
 {
-        switch(t){
+    const struct lyd_node *leafref = NULL;
+    switch(leaf->value_type){
         case LY_TYPE_BINARY:
             return SR_BINARY_T;
         case LY_TYPE_BITS:
@@ -478,6 +499,12 @@ sr_libyang_type_to_sysrepo(LY_DATA_TYPE t)
             return SR_IDENTITYREF_T;
         case LY_TYPE_INST:
             return SR_INSTANCEID_T;
+        case LY_TYPE_LEAFREF:
+            leafref = leaf->value.leafref;
+            if (NULL != leafref && ((LYS_LEAF | LYS_LEAFLIST) & leafref->schema->nodetype)) {
+                return sr_libyang_leaf_get_type((const struct lyd_node_leaf_list *)leafref);
+            }
+            return SR_UNKNOWN_T;
         case LY_TYPE_STRING:
             return SR_STRING_T;
         case LY_TYPE_UNION:
@@ -500,9 +527,180 @@ sr_libyang_type_to_sysrepo(LY_DATA_TYPE t)
             return SR_UINT64_T;
         default:
             return SR_UNKNOWN_T;
-            //LY_LEAFREF, LY_DERIVED
+            //LY_DERIVED
         }
 }
+
+/**
+ * Functions copies the bits into string
+ * @param [in] leaf - data tree node from the bits will be copied
+ * @param [out] dest - space separated set bit field
+ * @return Error code (SR_ERR_OK on success)
+ */
+static int
+sr_libyang_leaf_copy_bits(const struct lyd_node_leaf_list *leaf, char **dest)
+{
+    CHECK_NULL_ARG3(leaf, dest, leaf->schema);
+
+    struct lys_node_leaf *sch = (struct lys_node_leaf *) leaf->schema;
+    char *bits_str = NULL;
+    int bits_count = sch->type.info.bits.count;
+    struct lys_type_bit **bits = leaf->value.bit;
+
+    size_t length = 1; /* terminating NULL byte*/
+    for (int i = 0; i < bits_count; i++) {
+        if (NULL != bits[i] && NULL != bits[i]->name) {
+            length += strlen(bits[i]->name);
+            length++; /*space after bit*/
+        }
+    }
+    bits_str = calloc(length, sizeof(*bits_str));
+    if (NULL == bits_str) {
+        SR_LOG_ERR_MSG("Memory allocation failed");
+        return SR_ERR_NOMEM;
+    }
+    size_t offset = 0;
+    for (int i = 0; i < bits_count; i++) {
+        if (NULL != bits[i] && NULL != bits[i]->name) {
+            strcpy(bits_str + offset, bits[i]->name);
+            offset += strlen(bits[i]->name);
+            bits_str[offset] = ' ';
+            offset++;
+        }
+    }
+    if (0 != offset) {
+        bits_str[offset - 1] = '\0';
+    }
+
+    *dest = bits_str;
+    return SR_ERR_OK;
+}
+
+
+int
+sr_libyang_leaf_copy_value(const struct lyd_node_leaf_list *leaf, sr_val_t *value)
+{
+    CHECK_NULL_ARG2(leaf, value);
+    int rc = SR_ERR_OK;
+    struct lys_node_leaf *leaf_schema = NULL;
+    const struct lyd_node *leafref = NULL;
+    LY_DATA_TYPE type = leaf->value_type;
+    if (NULL == leaf->schema || NULL == leaf->schema->name) {
+        SR_LOG_ERR_MSG("Missing schema information");
+        return SR_ERR_INTERNAL;
+    }
+
+    switch (type) {
+    case LY_TYPE_BINARY:
+        if (NULL == leaf->value.binary) {
+            SR_LOG_ERR("Binary data in leaf '%s' is NULL", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        value->data.binary_val = strdup(leaf->value.binary);
+        if (NULL == value->data.binary_val) {
+            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'binary'", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_BITS:
+        if (NULL == leaf->value.bit) {
+            SR_LOG_ERR("Missing schema information for node '%s'", leaf->schema->name);
+        }
+        rc = sr_libyang_leaf_copy_bits(leaf, &(value->data.bits_val));
+        if (SR_ERR_OK != rc) {
+            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'bits'", leaf->schema->name);
+        }
+        return rc;
+    case LY_TYPE_BOOL:
+        value->data.bool_val = leaf->value.bln;
+        return SR_ERR_OK;
+    case LY_TYPE_DEC64:
+        value->data.decimal64_val = (double) leaf->value.dec64;
+        leaf_schema = (struct lys_node_leaf *) leaf->schema;
+        for (size_t i = 0; i < leaf_schema->type.info.dec64.dig; i++) {
+            /* shift decimal point*/
+            value->data.decimal64_val *= 0.1;
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_EMPTY:
+        return SR_ERR_OK;
+    case LY_TYPE_ENUM:
+        if (NULL == leaf->value.enm || NULL == leaf->value.enm->name) {
+            SR_LOG_ERR("Missing schema information for node '%s'", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        value->data.enum_val = strdup(leaf->value.enm->name);
+        if (NULL == value->data.enum_val) {
+            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'enum'", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_IDENT:
+        if (NULL == leaf->value.ident->name) {
+            SR_LOG_ERR("Identity ref in leaf '%s' is NULL", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        value->data.identityref_val = strdup(leaf->value.ident->name);
+        if (NULL == value->data.identityref_val) {
+            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'identityref'", leaf->schema->name);
+            return SR_ERR_INTERNAL;
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_INST:
+        /* NOT IMPLEMENTED yet*/
+        if (NULL != leaf->schema && NULL != leaf->schema->name) {
+            SR_LOG_ERR("Copy value failed for leaf '%s'", leaf->schema->name);
+        }
+        return SR_ERR_INTERNAL;
+    case LY_TYPE_LEAFREF:
+        leafref = leaf->value.leafref;
+        if (NULL != leafref && ((LYS_LEAF | LYS_LEAFLIST) & leafref->schema->nodetype)) {
+            return sr_libyang_leaf_copy_value((const struct lyd_node_leaf_list *)leafref, value);
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_STRING:
+        if (NULL != leaf->value.string) {
+            value->data.string_val = strdup(leaf->value.string);
+            if (NULL == value->data.string_val) {
+                SR_LOG_ERR_MSG("String duplication failed");
+                return SR_ERR_NOMEM;
+            }
+        }
+        return SR_ERR_OK;
+    case LY_TYPE_UNION:
+        /* Copy of selected union type should be called instead */
+        SR_LOG_ERR("Can not copy value of union '%s'", leaf->schema->name);
+        return SR_ERR_INTERNAL;
+    case LY_TYPE_INT8:
+        value->data.int8_val = leaf->value.int8;
+        return SR_ERR_OK;
+    case LY_TYPE_UINT8:
+        value->data.uint8_val = leaf->value.uint8;
+        return SR_ERR_OK;
+    case LY_TYPE_INT16:
+        value->data.int16_val = leaf->value.int16;
+        return SR_ERR_OK;
+    case LY_TYPE_UINT16:
+        value->data.uint16_val = leaf->value.uint16;
+        return SR_ERR_OK;
+    case LY_TYPE_INT32:
+        value->data.int32_val = leaf->value.int32;
+        return SR_ERR_OK;
+    case LY_TYPE_UINT32:
+        value->data.uint32_val = leaf->value.uint32;
+        return SR_ERR_OK;
+    case LY_TYPE_INT64:
+        value->data.int64_val = leaf->value.int64;
+        return SR_ERR_OK;
+    case LY_TYPE_UINT64:
+        value->data.uint64_val = leaf->value.uint64;
+        return SR_ERR_OK;
+    default:
+        SR_LOG_ERR("Copy value failed for leaf '%s'", leaf->schema->name);
+        return SR_ERR_INTERNAL;
+    }
+}
+
 
 static int
 sr_dec64_to_str(double val, const struct lys_node *schema_node, char **out)
@@ -600,12 +798,6 @@ sr_val_to_str(const sr_val_t *value, const struct lys_node *schema_node, char **
         *out = calloc(len + 1, sizeof(**out));
         CHECK_NULL_NOMEM_RETURN(*out);
         snprintf(*out, len + 1, "%"PRId64, value->data.int64_val);
-        break;
-    case SR_LEAFREF_T:
-        if (NULL != value->data.leafref_val) {
-            *out = strdup(value->data.leafref_val);
-            CHECK_NULL_NOMEM_RETURN(*out);
-        }
         break;
     case SR_STRING_T:
         if (NULL != value->data.string_val){
@@ -748,6 +940,18 @@ sr_free_schema(sr_schema_t *schema)
     }
 }
 
+void
+sr_free_changes(sr_change_t *changes, size_t count)
+{
+    if (NULL != changes) {
+        for (size_t i = 0; i < count; i++) {
+            sr_free_val(changes[i].old_value);
+            sr_free_val(changes[i].new_value);
+        }
+        free(changes);
+    }
+}
+
 /**
  * @brief Signal handler used to deliver initialization result from daemon
  * child to daemon parent process, so that the parent can exit with appropriate exit code.
@@ -788,7 +992,7 @@ sr_daemon_check_single_instance(const char *pid_file, int *pid_file_fd)
     /* open PID file */
     *pid_file_fd = open(pid_file, O_RDWR | O_CREAT, 0640);
     if (*pid_file_fd < 0) {
-        SR_LOG_ERR("Unable to open sysrepo PID file '%s': %s.", pid_file, strerror(errno));
+        SR_LOG_ERR("Unable to open sysrepo PID file '%s': %s.", pid_file, sr_strerror_safe(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -797,7 +1001,7 @@ sr_daemon_check_single_instance(const char *pid_file, int *pid_file_fd)
         if (EACCES == errno || EAGAIN == errno) {
             SR_LOG_ERR_MSG("Another instance of sysrepo daemon is running, unable to start.");
         } else {
-            SR_LOG_ERR("Unable to lock sysrepo PID file '%s': %s.", pid_file, strerror(errno));
+            SR_LOG_ERR("Unable to lock sysrepo PID file '%s': %s.", pid_file, sr_strerror_safe(errno));
         }
         exit(EXIT_FAILURE);
     }
@@ -806,7 +1010,7 @@ sr_daemon_check_single_instance(const char *pid_file, int *pid_file_fd)
     snprintf(str, NAME_MAX, "%d\n", getpid());
     ret = write(*pid_file_fd, str, strlen(str));
     if (-1 == ret) {
-        SR_LOG_ERR("Unable to write into sysrepo PID file '%s': %s.", pid_file, strerror(errno));
+        SR_LOG_ERR("Unable to write into sysrepo PID file '%s': %s.", pid_file, sr_strerror_safe(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -872,7 +1076,7 @@ sr_daemonize(bool debug_mode, int log_level, const char *pid_file, int *pid_file
     /* fork off the parent process. */
     pid = fork();
     if (pid < 0) {
-        SR_LOG_ERR("Unable to fork sysrepo plugin daemon: %s.", strerror(errno));
+        SR_LOG_ERR("Unable to fork sysrepo plugin daemon: %s.", sr_strerror_safe(errno));
         exit(EXIT_FAILURE);
     }
     if (pid > 0) {
@@ -891,13 +1095,13 @@ sr_daemonize(bool debug_mode, int log_level, const char *pid_file, int *pid_file
     /* create a new session containing a single (new) process group */
     sid = setsid();
     if (sid < 0) {
-        SR_LOG_ERR("Unable to create new session: %s.", strerror(errno));
+        SR_LOG_ERR("Unable to create new session: %s.", sr_strerror_safe(errno));
         exit(EXIT_FAILURE);
     }
 
     /* change the current working directory. */
     if ((chdir(SR_DEAMON_WORK_DIR)) < 0) {
-        SR_LOG_ERR("Unable to change directory to '%s': %s.", SR_DEAMON_WORK_DIR, strerror(errno));
+        SR_LOG_ERR("Unable to change directory to '%s': %s.", SR_DEAMON_WORK_DIR, sr_strerror_safe(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -920,4 +1124,81 @@ void
 sr_daemonize_signal_success(pid_t parent_pid)
 {
     kill(parent_pid, SIGUSR1);
+}
+
+int
+sr_set_socket_dir_permissions(const char *socket_dir, const char *data_serach_dir, const char *module_name, bool strict)
+{
+    char *data_file_name = NULL;
+    struct stat data_file_stat = { 0, };
+    mode_t mode = 0;
+    int ret = 0, rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(socket_dir, module_name);
+
+    /* skip privilege setting for internal 'module name' */
+    if (0 == strcmp(module_name, SR_GLOBAL_SUBSCRIPTIONS_SUBDIR)) {
+        return SR_ERR_OK;
+    }
+
+    /* retrieve module's data filename */
+    rc = sr_get_data_file_name(data_serach_dir, module_name, SR_DS_STARTUP, &data_file_name);
+    CHECK_RC_LOG_RETURN(rc, "Unable to get data file name for module %s.", module_name);
+
+    /* lookup for permissions of the data file */
+    ret = stat(data_file_name, &data_file_stat);
+    free(data_file_name);
+
+    CHECK_ZERO_LOG_RETURN(ret, SR_ERR_INTERNAL, "Unable to stat data file for '%s': %s.", module_name, sr_strerror_safe(errno));
+
+    mode = data_file_stat.st_mode;
+    /* set the execute permissions to be the same as write permissions */
+    if (mode & S_IWUSR) {
+        mode |= S_IXUSR;
+    }
+    if (mode & S_IWGRP) {
+        mode |= S_IXGRP;
+    }
+    if (mode & S_IWOTH) {
+        mode |= S_IXOTH;
+    }
+
+    /* change the permissions */
+    ret = chmod(socket_dir, mode);
+    CHECK_ZERO_LOG_RETURN(ret, SR_ERR_UNAUTHORIZED, "Unable to execute chmod on '%s': %s.", socket_dir, sr_strerror_safe(errno));
+
+    /* change the owner (if possible) */
+    ret = chown(socket_dir, data_file_stat.st_uid, data_file_stat.st_gid);
+    if (0 != ret) {
+        if (strict) {
+            SR_LOG_ERR("Unable to execute chown on '%s': %s.", socket_dir, sr_strerror_safe(errno));
+            return SR_ERR_INTERNAL;
+        } else {
+            /* non-privileged process may not be able to set chown - print warning, since
+             * this may prevent some users otherwise allowed to access the data to connect to our socket.
+             * Correct permissions can be set up at any time using sysrepoctl. */
+            SR_LOG_WRN("Unable to execute chown on '%s': %s.", socket_dir, sr_strerror_safe(errno));
+        }
+    }
+
+    return rc;
+}
+
+int
+sr_clock_get_time(clockid_t clock_id, struct timespec *ts)
+{
+    CHECK_NULL_ARG(ts);
+#ifdef __APPLE__
+    /* OS X */
+    clock_serv_t cclock = {0};
+    mach_timespec_t mts = {0};
+    host_get_clock_service(mach_host_self(), clock_id, &cclock);
+    clock_get_time(cclock, &mts);
+    mach_port_deallocate(mach_task_self(), cclock);
+    ts->tv_sec = mts.tv_sec;
+    ts->tv_nsec = mts.tv_nsec;
+    return 0;
+#else
+    return clock_gettime(clock_id, ts);
+#endif
 }

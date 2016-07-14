@@ -133,6 +133,79 @@ createDataTreeTestModule()
     n = lyd_new_leaf(node, module, "union", "infinity");
     assert_non_null(n);
 
+    /* list + list of leafrefs */
+    node = lyd_new(NULL, module, "university");
+    assert_non_null(node);
+    assert_int_equal(0,lyd_insert_after(r, node));
+
+    node = lyd_new(node, module, "students");
+    assert_non_null(node);
+    /*  -> student: nameA */
+    node = lyd_new(node, module, "student");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "name", "nameA");
+    assert_non_null(n);
+    n = lyd_new_leaf(node, module, "age", "19");
+    assert_non_null(n);
+
+    node = node->parent;
+    assert_non_null(node);
+
+    /*  -> student: nameB */
+    node = lyd_new(node, module, "student");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "name", "nameB");
+    assert_non_null(n);
+    n = lyd_new_leaf(node, module, "age", "17");
+    assert_non_null(n);
+
+    node = node->parent;
+    assert_non_null(node);
+
+    /*  -> student: nameC */
+    node = lyd_new(node, module, "student");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "name", "nameC");
+    assert_non_null(n);
+    n = lyd_new_leaf(node, module, "age", "18");
+    assert_non_null(n);
+
+    node = node->parent;
+    assert_non_null(node);
+    node = node->parent;
+    assert_non_null(node);
+
+    node = lyd_new(node, module, "classes");
+    assert_non_null(node);
+
+    /*  -> class: CCNA */
+    node = lyd_new(node, module, "class");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "title", "CCNA");
+    assert_non_null(n);
+    node = lyd_new(node, module, "student");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "name", "nameB");
+    assert_non_null(n);
+    n = lyd_new_leaf(node, module, "age", "17");
+    assert_non_null(n);
+    node = node->parent;
+    assert_non_null(node);
+    node = lyd_new(node, module, "student");
+    assert_non_null(node);
+    n = lyd_new_leaf(node, module, "name", "nameC");
+    assert_non_null(n);
+
+    /* leafref chain */
+    node = lyd_new(NULL, module, "leafref-chain");
+    assert_non_null(node);
+    assert_int_equal(0,lyd_insert_after(r, node));
+    n = lyd_new_leaf(node, module, "D", "final-leaf");
+    assert_non_null(n);
+    n = lyd_new_leaf(node, module, "C", "final-leaf");
+    assert_non_null(n);
+
+    /* validate & save */
     assert_int_equal(0, lyd_validate(&r, LYD_OPT_STRICT | LYD_OPT_CONFIG));
     assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_MODULE_DATA_FILE_NAME, r));
 
@@ -198,11 +271,68 @@ createDataTreeLargeExampleModule(int list_count)
 }
 
 void
+createDataTreeLargeIETFinterfacesModule(size_t if_count)
+{
+
+    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    assert_non_null(ctx);
+
+    struct lyd_node *root = NULL;
+
+    #define MAX_IF_LEN 150
+    const char *template_prefix_len = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/address[ip='192.168.%d.%d']/prefix-length";
+    const char *template_type = "/ietf-interfaces:interfaces/interface[name='eth%d']/type";
+    const char *template_desc = "/ietf-interfaces:interfaces/interface[name='eth%d']/description";
+    const char *template_enabled = "/ietf-interfaces:interfaces/interface[name='eth%d']/enabled";
+    const char *template_ipv4_enabled = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/enabled";
+    const char *template_ipv4_mtu = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/mtu";
+    char xpath[MAX_IF_LEN] = {0,};
+
+    const struct lys_module *module_interfaces = ly_ctx_load_module(ctx, "ietf-interfaces", NULL);
+    assert_non_null(module_interfaces);
+    const struct lys_module *module_ip = ly_ctx_load_module(ctx, "ietf-ip", NULL);
+    assert_non_null(module_ip);
+    const struct lys_module *module = ly_ctx_load_module(ctx, "iana-if-type", "2014-05-08");
+    assert_non_null(module);
+    struct lyd_node *node = NULL;
+
+    for (size_t i = 1; i < (if_count+1); i++) {
+        snprintf(xpath, MAX_IF_LEN, template_prefix_len, i, (i/244 +1), i % 244);
+        node = lyd_new_path(root, ctx, xpath, "24", 0);
+        if (NULL == root) {
+            root = node;
+        }
+        snprintf(xpath, MAX_IF_LEN, template_type, i);
+        lyd_new_path(root, ctx, xpath, "ethernetCsmacd", 0);
+
+        snprintf(xpath, MAX_IF_LEN, template_desc, i);
+        lyd_new_path(root, ctx, xpath, "ethernet interface", 0);
+
+        snprintf(xpath, MAX_IF_LEN, template_enabled, i);
+        lyd_new_path(root, ctx, xpath, "true", 0);
+
+        snprintf(xpath, MAX_IF_LEN, template_ipv4_enabled, i);
+        lyd_new_path(root, ctx, xpath, "true", 0);
+
+        snprintf(xpath, MAX_IF_LEN, template_ipv4_mtu, i);
+        lyd_new_path(root, ctx, xpath, "1500", 0);
+
+    }
+
+
+    assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root));
+
+    lyd_free_withsiblings(root);
+    ly_ctx_destroy(ctx, NULL);
+}
+
+void
 createDataTreeIETFinterfacesModule(){
 
     struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
     assert_non_null(ctx);
-    
+
     struct lyd_node *root = NULL;
 
     const struct lys_module *module_interfaces = ly_ctx_load_module(ctx, "ietf-interfaces", NULL);
@@ -244,7 +374,7 @@ createDataTreeIETFinterfacesModule(){
 
     assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG));
     assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root));
-    
+
     lyd_free_withsiblings(root);
     ly_ctx_destroy(ctx, NULL);
 }

@@ -20,6 +20,7 @@
  */
 
 #include <libyang/libyang.h>
+#include <pthread.h>
 #include "sysrepo.h"
 #include "sr_common.h"
 
@@ -27,174 +28,6 @@
 #include "rp_internal.h"
 #include "rp_dt_get.h"
 #include "rp_dt_xpath.h"
-
-/**
- * Functions copies the bits into string
- * @param [in] leaf - data tree node from the bits will be copied
- * @param [out] dest - space separated set bit field
- * @return Error code (SR_ERR_OK on success)
- */
-static int
-rp_dt_copy_bits(const struct lyd_node_leaf_list *leaf, char **dest)
-{
-    CHECK_NULL_ARG3(leaf, dest, leaf->schema);
-
-    struct lys_node_leaf *sch = (struct lys_node_leaf *) leaf->schema;
-    char *bits_str = NULL;
-    int bits_count = sch->type.info.bits.count;
-    struct lys_type_bit **bits = leaf->value.bit;
-
-    size_t length = 1; /* terminating NULL byte*/
-    for (int i = 0; i < bits_count; i++) {
-        if (NULL != bits[i] && NULL != bits[i]->name) {
-            length += strlen(bits[i]->name);
-            length++; /*space after bit*/
-        }
-    }
-    bits_str = calloc(length, sizeof(*bits_str));
-    if (NULL == bits_str) {
-        SR_LOG_ERR_MSG("Memory allocation failed");
-        return SR_ERR_NOMEM;
-    }
-    size_t offset = 0;
-    for (int i = 0; i < bits_count; i++) {
-        if (NULL != bits[i] && NULL != bits[i]->name) {
-            strcpy(bits_str + offset, bits[i]->name);
-            offset += strlen(bits[i]->name);
-            bits_str[offset] = ' ';
-            offset++;
-        }
-    }
-    if (0 != offset) {
-        bits_str[offset - 1] = '\0';
-    }
-
-    *dest = bits_str;
-    return SR_ERR_OK;
-}
-
-/**
- * @brief Copies value from lyd_node to the sr_val_t.
- * @param [in] leaf input which is copied
- * @param [in] type
- * @param [in] value where the content is copied to
- * @return Error code (SR_ERR_OK on success)
- */
-static int
-rp_dt_copy_value(const struct lyd_node_leaf_list *leaf, LY_DATA_TYPE type, sr_val_t *value)
-{
-    CHECK_NULL_ARG2(leaf, value);
-    int rc = SR_ERR_OK;
-    struct lys_node_leaf *leaf_schema = NULL;
-    if (NULL == leaf->schema || NULL == leaf->schema->name) {
-        SR_LOG_ERR_MSG("Missing schema information");
-        return SR_ERR_INTERNAL;
-    }
-
-    switch (type) {
-    case LY_TYPE_BINARY:
-        if (NULL == leaf->value.binary) {
-            SR_LOG_ERR("Binary data in leaf '%s' is NULL", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        value->data.binary_val = strdup(leaf->value.binary);
-        if (NULL == value->data.binary_val) {
-            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'binary'", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        return SR_ERR_OK;
-    case LY_TYPE_BITS:
-        if (NULL == leaf->value.bit) {
-            SR_LOG_ERR("Missing schema information for node '%s'", leaf->schema->name);
-        }
-        rc = rp_dt_copy_bits(leaf, &(value->data.bits_val));
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'bits'", leaf->schema->name);
-        }
-        return rc;
-    case LY_TYPE_BOOL:
-        value->data.bool_val = leaf->value.bln;
-        return SR_ERR_OK;
-    case LY_TYPE_DEC64:
-        value->data.decimal64_val = (double) leaf->value.dec64;
-        leaf_schema = (struct lys_node_leaf *) leaf->schema;
-        for (size_t i = 0; i < leaf_schema->type.info.dec64.dig; i++) {
-            /* shift decimal point*/
-            value->data.decimal64_val *= 0.1;
-        }
-        return SR_ERR_OK;
-    case LY_TYPE_EMPTY:
-        return SR_ERR_OK;
-    case LY_TYPE_ENUM:
-        if (NULL == leaf->value.enm || NULL == leaf->value.enm->name) {
-            SR_LOG_ERR("Missing schema information for node '%s'", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        value->data.enum_val = strdup(leaf->value.enm->name);
-        if (NULL == value->data.enum_val) {
-            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'enum'", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        return SR_ERR_OK;
-    case LY_TYPE_IDENT:
-        if (NULL == leaf->value.ident->name) {
-            SR_LOG_ERR("Identity ref in leaf '%s' is NULL", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        value->data.identityref_val = strdup(leaf->value.ident->name);
-        if (NULL == value->data.identityref_val) {
-            SR_LOG_ERR("Copy value failed for leaf '%s' of type 'identityref'", leaf->schema->name);
-            return SR_ERR_INTERNAL;
-        }
-        return SR_ERR_OK;
-    case LY_TYPE_INST:
-        /* NOT IMPLEMENTED yet*/
-        if (NULL != leaf->schema && NULL != leaf->schema->name) {
-            SR_LOG_ERR("Copy value failed for leaf '%s'", leaf->schema->name);
-        }
-        return SR_ERR_INTERNAL;
-    case LY_TYPE_STRING:
-        if (NULL != leaf->value.string) {
-            value->data.string_val = strdup(leaf->value.string);
-            if (NULL == value->data.string_val) {
-                SR_LOG_ERR_MSG("String duplication failed");
-                return SR_ERR_NOMEM;
-            }
-        }
-        return SR_ERR_OK;
-    case LY_TYPE_UNION:
-        /* Copy of selected union type should be called instead */
-        SR_LOG_ERR("Can not copy value of union '%s'", leaf->schema->name);
-        return SR_ERR_INTERNAL;
-    case LY_TYPE_INT8:
-        value->data.int8_val = leaf->value.int8;
-        return SR_ERR_OK;
-    case LY_TYPE_UINT8:
-        value->data.uint8_val = leaf->value.uint8;
-        return SR_ERR_OK;
-    case LY_TYPE_INT16:
-        value->data.int16_val = leaf->value.int16;
-        return SR_ERR_OK;
-    case LY_TYPE_UINT16:
-        value->data.uint16_val = leaf->value.uint16;
-        return SR_ERR_OK;
-    case LY_TYPE_INT32:
-        value->data.int32_val = leaf->value.int32;
-        return SR_ERR_OK;
-    case LY_TYPE_UINT32:
-        value->data.uint32_val = leaf->value.uint32;
-        return SR_ERR_OK;
-    case LY_TYPE_INT64:
-        value->data.int64_val = leaf->value.int64;
-        return SR_ERR_OK;
-    case LY_TYPE_UINT64:
-        value->data.uint64_val = leaf->value.uint64;
-        return SR_ERR_OK;
-    default:
-        SR_LOG_ERR("Copy value failed for leaf '%s'", leaf->schema->name);
-        return SR_ERR_INTERNAL;
-    }
-}
 
 /**
  * @brief Fills sr_val_t from lyd_node structure. It fills xpath and copies the value.
@@ -213,10 +46,7 @@ rp_dt_get_value_from_node(struct lyd_node *node, sr_val_t *val)
     struct lys_node_container *sch_cont = NULL;
 
     rc = rp_dt_create_xpath_for_node(node, &xpath);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("Create xpath for node failed");
-        return rc;
-    }
+    CHECK_RC_MSG_RETURN(rc, "Create xpath for node failed");
     val->xpath = xpath;
 
     switch (node->schema->nodetype) {
@@ -224,13 +54,16 @@ rp_dt_get_value_from_node(struct lyd_node *node, sr_val_t *val)
         data_leaf = (struct lyd_node_leaf_list *) node;
         val->dflt = node->dflt;
 
-        val->type = sr_libyang_type_to_sysrepo(data_leaf->value_type);
-
-        rc = rp_dt_copy_value(data_leaf, data_leaf->value_type, val);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Copying of value failed");
-            goto cleanup;
+        if (data_leaf->value_type == LY_TYPE_LEAFREF && NULL == data_leaf->value.leafref) {
+            if (0 != lyd_validate_leafref(data_leaf)) {
+                SR_LOG_WRN("Cannot resolve leafref \"%s\" just yet.", xpath);
+            }
         }
+
+        val->type = sr_libyang_leaf_get_type(data_leaf);
+
+        rc = sr_libyang_leaf_copy_value(data_leaf, val);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Copying of value failed");
         break;
     case LYS_CONTAINER:
         sch_cont = (struct lys_node_container *) node->schema;
@@ -242,13 +75,10 @@ rp_dt_get_value_from_node(struct lyd_node *node, sr_val_t *val)
     case LYS_LEAFLIST:
         data_leaf = (struct lyd_node_leaf_list *) node;
 
-        val->type = sr_libyang_type_to_sysrepo(data_leaf->value_type);
+        val->type = sr_libyang_leaf_get_type(data_leaf);
 
-        rc = rp_dt_copy_value(data_leaf, data_leaf->value_type, val);
-        if (SR_ERR_OK != rc) {
-            SR_LOG_ERR_MSG("Copying of value failed");
-            goto cleanup;
-        }
+        rc = sr_libyang_leaf_copy_value(data_leaf, val);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Copying of value failed");
         break;
     default:
         SR_LOG_WRN_MSG("Get value is not implemented for this node type");
@@ -283,7 +113,7 @@ rp_dt_get_values_from_nodes(struct ly_set *nodes, sr_val_t **values, size_t *val
         rc = rp_dt_get_value_from_node(node, &vals[i]);
         if (SR_ERR_OK != rc) {
             SR_LOG_ERR("Getting value from node %s failed", node->schema->name);
-            free(vals);
+            sr_free_values(vals, i);
             return SR_ERR_INTERNAL;
         }
         cnt++;
@@ -368,10 +198,7 @@ rp_dt_get_value_wrapper(rp_ctx_t *rp_ctx, rp_session_t *rp_session, const char *
     }
 
     rc = sr_copy_first_ns(xpath, &data_tree_name);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Copying module name failed for xpath '%s'", xpath);
-        goto cleanup;
-    }
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Copying module name failed for xpath '%s'", xpath);
 
     rc = dm_get_datatree(rp_ctx->dm_ctx, rp_session->dm_session, data_tree_name, &data_tree);
     if (SR_ERR_OK != rc) {
@@ -384,10 +211,12 @@ rp_dt_get_value_wrapper(rp_ctx_t *rp_ctx, rp_session_t *rp_session, const char *
     rc = rp_dt_get_value(rp_ctx->dm_ctx, data_tree, xpath, dm_is_running_ds_session(rp_session->dm_session), value);
 cleanup:
     if (SR_ERR_NOT_FOUND == rc) {
-#if 0
-        rc = rp_dt_validate_node_xpath(rp_ctx->dm_ctx, rp_session->dm_session, xpath, NULL, NULL);
-        rc = rc == SR_ERR_OK ? SR_ERR_NOT_FOUND : rc;
-#endif
+        rc = rp_dt_validate_node_xpath(rp_ctx->dm_ctx, NULL, xpath, NULL, NULL);
+        if (SR_ERR_OK != rc) {
+            /* Print warning only, because we are not able to validate all xpath */
+            SR_LOG_WRN("Validation of xpath %s was not successful", xpath);
+        }
+        rc = SR_ERR_NOT_FOUND;
     } else if (SR_ERR_OK != rc) {
         SR_LOG_ERR("Get value failed for xpath '%s'", xpath);
     }
@@ -408,34 +237,30 @@ rp_dt_get_values_wrapper(rp_ctx_t *rp_ctx, rp_session_t *rp_session, const char 
     char *data_tree_name = NULL;
 
     rc = sr_copy_first_ns(xpath, &data_tree_name);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Copying module name failed for xpath '%s'", xpath);
-        goto cleanup;
-    }
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Copying module name failed for xpath '%s'", xpath);
+
     rc = ac_check_node_permissions(rp_session->ac_session, xpath, AC_OPER_READ);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Access control check failed for xpath '%s'", xpath);
-        goto cleanup;
-    }
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Access control check failed for xpath '%s'", xpath);
+
     rc = dm_get_datatree(rp_ctx->dm_ctx, rp_session->dm_session, data_tree_name, &data_tree);
     if (SR_ERR_OK != rc) {
         if (SR_ERR_NOT_FOUND != rc) {
-            SR_LOG_ERR("Getting data tree failed (%d) for xpath '%s'", rc, xpath);
+            SR_LOG_ERR("Getting data tree failed (%s) for xpath '%s'", strerror(rc), xpath);
         }
         goto cleanup;
     }
 
     rc = rp_dt_get_values(rp_ctx->dm_ctx, data_tree, xpath, dm_is_running_ds_session(rp_session->dm_session), values, count);
-    if (SR_ERR_OK != rc) {
+    if (SR_ERR_OK != rc && SR_ERR_NOT_FOUND != rc) {
         SR_LOG_ERR("Get values failed for xpath '%s'", xpath);
     }
 
 cleanup:
     if (SR_ERR_NOT_FOUND == rc || (SR_ERR_OK == rc && 0 == count)) {
-#if 0
-        rc = rp_dt_validate_node_xpath(rp_ctx->dm_ctx, rp_session->dm_session, xpath, NULL, NULL);
-        rc = rc == SR_ERR_OK ? SR_ERR_NOT_FOUND : rc;
-#endif
+        if (SR_ERR_OK != rp_dt_validate_node_xpath(rp_ctx->dm_ctx, NULL, xpath, NULL, NULL)) {
+            /* Print warning only, because we are not able to validate all xpath */
+            SR_LOG_WRN("Validation of xpath %s was not successful", xpath);
+        }
     }
     free(data_tree_name);
     return rc;
@@ -455,16 +280,10 @@ rp_dt_get_values_wrapper_with_opts(rp_ctx_t *rp_ctx, rp_session_t *rp_session, r
     char *data_tree_name = NULL;
 
     rc = sr_copy_first_ns(xpath, &data_tree_name);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Copying module name failed for xpath '%s'", xpath);
-        goto cleanup;
-    }
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Copying module name failed for xpath '%s'", xpath);
 
     rc = ac_check_node_permissions(rp_session->ac_session, xpath, AC_OPER_READ);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Access control check failed for xpath '%s'", xpath);
-        goto cleanup;
-    }
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Access control check failed for xpath '%s'", xpath);
 
     rc = dm_get_datatree(rp_ctx->dm_ctx, rp_session->dm_session, data_tree_name, &data_tree);
     if (SR_ERR_OK != rc) {
@@ -485,10 +304,12 @@ rp_dt_get_values_wrapper_with_opts(rp_ctx_t *rp_ctx, rp_session_t *rp_session, r
     rc = rp_dt_get_values_from_nodes(nodes, values, count);
 cleanup:
     if (SR_ERR_NOT_FOUND == rc) {
-#if 0
-        rc = rp_dt_validate_node_xpath(rp_ctx->dm_ctx, rp_session->dm_session, xpath, NULL, NULL);
-        rc = rc == SR_ERR_OK ? SR_ERR_NOT_FOUND : rc;
-#endif
+        rc = rp_dt_validate_node_xpath(rp_ctx->dm_ctx, NULL, xpath, NULL, NULL);
+        if (SR_ERR_OK != rc) {
+            /* Print warning only, because we are not able to validate all xpath */
+            SR_LOG_WRN("Validation of xpath %s was not successful", xpath);
+        }
+        rc = SR_ERR_NOT_FOUND;
     } else if (SR_ERR_OK != rc) {
         SR_LOG_ERR("Copying values from nodes failed for xpath '%s'", xpath);
     }
@@ -497,4 +318,212 @@ cleanup:
     free(data_tree_name);
     return rc;
 
+}
+
+/**
+ * @brief generates changes for the children of created/deleted container/list
+ *
+ */
+static int
+rp_dt_add_changes_for_children(sr_list_t *changes, LYD_DIFFTYPE type, struct lyd_node *node)
+{
+    CHECK_NULL_ARG2(changes, node);
+    int rc = SR_ERR_OK;
+    struct lyd_node *next = NULL, *elem = NULL;
+    sr_change_t *ch = NULL;
+
+    LY_TREE_DFS_BEGIN(node, next, elem) {
+        ch = calloc(1, sizeof(*ch));
+        CHECK_NULL_NOMEM_GOTO(ch, rc, cleanup);
+
+        ch->oper = type == LYD_DIFF_CREATED ?  SR_OP_CREATED : SR_OP_DELETED;
+        ch->sch_node = elem->schema;
+
+        sr_val_t **ptr = LYD_DIFF_CREATED == type ? &ch->new_value : &ch->old_value;
+        *ptr = calloc(1, sizeof(**ptr));
+        CHECK_NULL_NOMEM_GOTO(*ptr, rc, cleanup);
+        rc = rp_dt_get_value_from_node(elem, *ptr);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+
+        rc = sr_list_add(changes, ch);
+        CHECK_RC_MSG_GOTO(rc, cleanup, "List add failed");
+        ch = NULL;
+        LYD_TREE_DFS_END(node, next, elem);
+    }
+cleanup:
+    if (NULL != ch) {
+        sr_free_changes(ch, 1);
+    }
+    return rc;
+}
+
+int
+rp_dt_difflist_to_changes(struct lyd_difflist *difflist, sr_list_t **changes)
+{
+    CHECK_NULL_ARG2(difflist, changes);
+    int rc = SR_ERR_OK;
+    sr_change_t *ch = NULL;
+
+    sr_list_t *list = NULL;
+    rc = sr_list_init(&list);
+    CHECK_RC_MSG_RETURN(rc, "List init failed");
+
+    for(size_t d_cnt = 0; LYD_DIFF_END != difflist->type[d_cnt]; d_cnt++) {
+        if (!(LYD_DIFF_CREATED == difflist->type[d_cnt] && (LYS_LIST | LYS_CONTAINER) & difflist->second[d_cnt]->schema->nodetype) &&
+            !(LYD_DIFF_DELETED == difflist->type[d_cnt] && (LYS_LIST | LYS_CONTAINER) & difflist->first[d_cnt]->schema->nodetype)) {
+            ch = calloc(1, sizeof(*ch));
+            CHECK_NULL_NOMEM_GOTO(ch, rc, cleanup);
+        }
+
+        switch (difflist->type[d_cnt]) {
+        case LYD_DIFF_CREATED:
+            if ((LYS_LIST | LYS_CONTAINER) & difflist->second[d_cnt]->schema->nodetype) {
+                rc = rp_dt_add_changes_for_children(list, difflist->type[d_cnt], difflist->second[d_cnt]);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Add changes for children failed");
+            } else {
+                ch->oper = SR_OP_CREATED;
+                ch->sch_node = difflist->second[d_cnt]->schema;
+                ch->new_value = calloc(1, sizeof(*ch->new_value));
+                CHECK_NULL_NOMEM_GOTO(ch->new_value, rc, cleanup);
+                rc = rp_dt_get_value_from_node(difflist->second[d_cnt], ch->new_value);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            }
+            break;
+        case LYD_DIFF_DELETED:
+            if ((LYS_LIST | LYS_CONTAINER) & difflist->first[d_cnt]->schema->nodetype) {
+                rc = rp_dt_add_changes_for_children(list, difflist->type[d_cnt], difflist->first[d_cnt]);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Add changes for children failed");
+            } else {
+                ch->oper = SR_OP_DELETED;
+                ch->sch_node = difflist->first[d_cnt]->schema;
+                ch->old_value = calloc(1, sizeof(*ch->old_value));
+                CHECK_NULL_NOMEM_GOTO(ch->old_value, rc, cleanup);
+                rc = rp_dt_get_value_from_node(difflist->first[d_cnt], ch->old_value);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            }
+            break;
+        case LYD_DIFF_MOVEDAFTER1:
+            ch->oper = SR_OP_MOVED;
+            ch->sch_node = difflist->first[d_cnt]->schema;
+
+            if (NULL != difflist->second[d_cnt]){
+                ch->old_value = calloc(1, sizeof(*ch->old_value));
+                CHECK_NULL_NOMEM_GOTO(ch->old_value, rc, cleanup);
+                rc = rp_dt_get_value_from_node(difflist->second[d_cnt], ch->old_value);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            }
+
+            ch->new_value = calloc(1, sizeof(*ch->new_value));
+            CHECK_NULL_NOMEM_GOTO(ch->new_value, rc, cleanup);
+            rc = rp_dt_get_value_from_node(difflist->first[d_cnt], ch->new_value);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            break;
+        case LYD_DIFF_MOVEDAFTER2:
+            ch->oper = SR_OP_MOVED;
+            ch->sch_node = difflist->second[d_cnt]->schema;
+
+            if (NULL != difflist->first[d_cnt]){
+                ch->old_value = calloc(1, sizeof(*ch->old_value));
+                CHECK_NULL_NOMEM_GOTO(ch->old_value, rc, cleanup);
+                rc = rp_dt_get_value_from_node(difflist->first[d_cnt], ch->old_value);
+                CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            }
+
+            ch->new_value = calloc(1, sizeof(*ch->new_value));
+            CHECK_NULL_NOMEM_GOTO(ch->new_value, rc, cleanup);
+            rc = rp_dt_get_value_from_node(difflist->second[d_cnt], ch->new_value);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+            break;
+        default:
+            /* case LYD_DIFF_CHANGED */
+            ch->oper = SR_OP_MODIFIED;
+            ch->sch_node = difflist->first[d_cnt]->schema;
+
+            ch->old_value = calloc(1, sizeof(*ch->old_value));
+            rc = rp_dt_get_value_from_node(difflist->first[d_cnt], ch->old_value);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+
+            ch->new_value = calloc(1, sizeof(*ch->new_value));
+            rc = rp_dt_get_value_from_node(difflist->second[d_cnt], ch->new_value);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Get value from node failed");
+        }
+
+        if (NULL != ch) {
+            rc = sr_list_add(list, ch);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "List add failed");
+            ch = NULL;
+        }
+
+    }
+
+cleanup:
+    if (SR_ERR_OK != rc) {
+        if (NULL != ch) {
+            sr_free_changes(ch, 1);
+        }
+        for (int i = 0; i < list->count; i++) {
+            sr_free_changes(list->data[i], 1);
+        }
+        sr_list_cleanup(list);
+    } else {
+        *changes = list;
+    }
+    return rc;
+}
+
+int
+rp_dt_get_changes(rp_ctx_t *rp_ctx, rp_session_t *rp_session, dm_commit_context_t *c_ctx, const char *xpath,
+        size_t offset, size_t limit, sr_list_t **matched_changes)
+{
+    CHECK_NULL_ARG4(rp_ctx, rp_session, c_ctx, xpath);
+    CHECK_NULL_ARG(matched_changes);
+
+    int rc = SR_ERR_OK;
+    char *module_name = NULL;
+    dm_model_subscription_t lookup = {0};
+    dm_model_subscription_t *ms = NULL;
+
+    rc = sr_copy_first_ns(xpath, &module_name);
+    CHECK_RC_MSG_RETURN(rc, "Copy first ns failed");
+
+    rc = dm_get_module(rp_ctx->dm_ctx, module_name, NULL, &lookup.module);
+    CHECK_RC_LOG_GOTO(rc, cleanup, "Dm get module failed for %s", module_name);
+
+    ms = sr_btree_search(c_ctx->subscriptions, &lookup);
+    if (NULL == ms) {
+        SR_LOG_ERR("Module subscription not found for module %s", lookup.module->name);
+        rc = SR_ERR_INTERNAL;
+        goto cleanup;
+    }
+
+
+    RWLOCK_RDLOCK_TIMED_CHECK_GOTO(&ms->changes_lock, rc, cleanup);
+
+    /* generate changes on demand */
+    if (!ms->changes_generated) {
+        pthread_rwlock_unlock(&ms->changes_lock);
+        /* acquire write lock */
+        RWLOCK_WRLOCK_TIMED_CHECK_GOTO(&ms->changes_lock, rc, cleanup);
+        /* check if some generated the changes meanwhile */
+        if (!ms->changes_generated) {
+            rc = rp_dt_difflist_to_changes(ms->difflist, &ms->changes);
+            if (SR_ERR_OK != rc) {
+                SR_LOG_ERR_MSG("Difflist to changes failed");
+                pthread_rwlock_unlock(&ms->changes_lock);
+                goto cleanup;
+            }
+            ms->changes_generated = true;
+        }
+    }
+
+    rc = rp_dt_find_changes(rp_ctx->dm_ctx, rp_session->dm_session, ms, &rp_session->change_ctx, xpath, offset, limit, matched_changes);
+    pthread_rwlock_unlock(&ms->changes_lock);
+
+    if (SR_ERR_NOT_FOUND != rc) {
+        CHECK_RC_LOG_GOTO(rc, cleanup, "Find changes failed for %s", xpath);
+    }
+
+cleanup:
+    free(module_name);
+    return rc;
 }
