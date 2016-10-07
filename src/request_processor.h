@@ -113,12 +113,25 @@ int rp_session_stop(const rp_ctx_t *rp_ctx, rp_session_t *session);
  *
  * @param[in] rp_ctx Request Processor context.
  * @param[in] session Request Processor session context related to the message.
- * @param[in] msg GPB Message to be passed. @note Message will be freed
+ * @param[in] msg GPB Message to be passed. @note Message will be freed.
  * automatically after calling, also in case of error.
  *
  * @return Error code (SR_ERR_OK on success).
  */
 int rp_msg_process(rp_ctx_t *rp_ctx, rp_session_t *session, Sr__Msg *msg);
+
+/**
+ * @brief Called to signal that all notification has been received and commit processing
+ * can continue.
+ *
+ * @param [in] rp_ctx
+ * @param [in] commit_id
+ * @param [in] result
+ * @param [in] err_subs_xpaths - freed by function
+ * @param [in] errors - freed by function
+ * @return Error code (SR_ERR_OK on success)
+ */
+int rp_resume_commit(rp_ctx_t *rp_ctx, uint32_t commit_id, int result, sr_list_t *err_subs_xpaths, sr_list_t *errors);
 
 /**@} rp */
 

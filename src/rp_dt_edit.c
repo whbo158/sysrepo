@@ -27,6 +27,7 @@
 #include "access_control.h"
 #include <pthread.h>
 #include <libyang/libyang.h>
+#include <inttypes.h>
 
 /**
  * @brief Checks if the schema node has a key node with the specified name
@@ -177,7 +178,6 @@ rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, co
     CHECK_NULL_ARG3(dm_ctx, session, xpath);
 
     int rc = SR_ERR_INVAL_ARG;
-    const struct lys_module *module = NULL;
     dm_data_info_t *info = NULL;
     struct ly_set *nodes = NULL;
     struct ly_set *parents = NULL;
@@ -194,12 +194,8 @@ rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, co
     /* find nodes nodes to be deleted */
     rc = rp_dt_find_nodes(dm_ctx, info->node, xpath, dm_is_running_ds_session(session), &nodes);
     if (SR_ERR_NOT_FOUND == rc) {
-        rc = rp_dt_validate_node_xpath(dm_ctx, session, xpath, &module, NULL);
-        if (SR_ERR_OK != rc && NULL == module) {
-            SR_LOG_ERR("Requested xpath is not valid %s", xpath);
-            return rc;
-        }
-        else if (SR_ERR_OK != rc) {
+        rc = rp_dt_validate_node_xpath(dm_ctx, session, xpath, NULL, NULL);
+        if (SR_ERR_OK != rc) {
             SR_LOG_WRN("Validation of xpath %s was not successful", xpath);
         }
 
@@ -299,7 +295,6 @@ rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, co
             }
         }
     }
-    dm_lyd_wd_add(dm_ctx, info->module->ctx, &info->node, LYD_WD_IMPL_TAG);
 cleanup:
     ly_set_free(parents);
     ly_set_free(nodes);
@@ -319,38 +314,40 @@ rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const
     const struct lys_module *module = NULL;
     struct lys_node *sch_node = NULL;
     dm_data_info_t *info = NULL;
+    dm_schema_info_t *schema_info = NULL;
     struct lyd_node *node = NULL;
 
     /* validate xpath */
-    rc = rp_dt_validate_node_xpath(dm_ctx, session, xpath, &module, &sch_node);
+    rc = rp_dt_validate_node_xpath_lock(dm_ctx, session, xpath, &schema_info, &sch_node);
     if (SR_ERR_OK != rc) {
         SR_LOG_ERR("Requested node is not valid %s", xpath);
         return rc;
     }
-
+    module = schema_info->module;
     if (NULL == sch_node) {
         SR_LOG_ERR("Node can not be created or update %s", xpath);
+        pthread_rwlock_unlock(&schema_info->model_lock);
         return SR_ERR_INVAL_ARG;
     }
 
     /* get data tree to be update */
     rc = dm_get_data_info(dm_ctx, session, module->name, &info);
+    if (SR_ERR_OK != rc) {
+        pthread_rwlock_unlock(&schema_info->model_lock);
+    }
+
     CHECK_RC_LOG_RETURN(rc, "Getting data tree failed for xpath '%s'", xpath);
 
     /* check if node is enabled */
     if (dm_is_running_ds_session(session)) {
-        dm_schema_info_t *si = NULL;
-        rc = dm_get_schema_info((dm_ctx_t *) dm_ctx, module->name, &si);
-        CHECK_RC_LOG_RETURN(rc, "Get schema info failed for %s", module->name);
-
-        pthread_rwlock_rdlock(&si->model_lock);
         if (!dm_is_enabled_check_recursively(sch_node)) {
             SR_LOG_ERR("The node is not enabled in running datastore %s", xpath);
-            pthread_rwlock_unlock(&si->model_lock);
+            pthread_rwlock_unlock(&schema_info->model_lock);
             return SR_ERR_INVAL_ARG;
         }
-        pthread_rwlock_unlock(&si->model_lock);
     }
+
+    pthread_rwlock_unlock(&schema_info->model_lock);
 
     /* non-presence container can not be created */
     if (LYS_CONTAINER == sch_node->nodetype && NULL == ((struct lys_node_container *) sch_node)->presence) {
@@ -388,7 +385,7 @@ rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const
             CHECK_NULL_NOMEM_GOTO(last_slash, rc, cleanup);
             char *parent_node = strndup(xpath, last_slash - xpath);
             CHECK_NULL_NOMEM_GOTO(parent_node, rc, cleanup);
-            struct ly_set *res = dm_lyd_get_node(dm_ctx, info->node, parent_node);
+            struct ly_set *res = lyd_find_xpath(info->node, parent_node);
             free(parent_node);
             if (NULL == res || 0 == res->number) {
                 SR_LOG_ERR("A preceding node is missing '%s' create it or omit the non recursive option", xpath);
@@ -403,9 +400,25 @@ rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const
     /* strict flag */
     int flags = (SR_EDIT_STRICT & options) ? 0 : LYD_PATH_OPT_UPDATE;
 
+    /* setting a leaf with default value should pass even with SR_EDIT_STRICT */
+    if ((SR_EDIT_STRICT & options) && sch_node->nodetype == LYS_LEAF && ((struct lys_node_leaf *) sch_node)->dflt != NULL) {
+        rc = rp_dt_find_node(dm_ctx, info->node, xpath, dm_is_running_ds_session(session), &node);
+        if (SR_ERR_NOT_FOUND != rc) {
+            CHECK_RC_LOG_GOTO(rc, cleanup, "Default node %s not found", xpath);
+        } else {
+            /* if leaf does not exists, it is ok LYD_PATH_OPT_UPDATE doesn't need to be added */
+            rc = SR_ERR_OK;
+        }
+        if (NULL != node && 0 == strcmp(((struct lyd_node_leaf_list *) node)->value_str, ((struct lys_node_leaf *) sch_node)->dflt)) {
+            /* add update flag */
+            flags |= LYD_PATH_OPT_UPDATE;
+        }
+    }
+
+
     /* create or update */
     ly_errno = 0;
-    node = dm_lyd_new_path(dm_ctx, info, module->ctx, xpath, new_value, flags);
+    node = dm_lyd_new_path(info, xpath, new_value, flags);
     if (NULL == node && LY_SUCCESS != ly_errno) {
         SR_LOG_ERR("Setting of item failed %s %d", xpath, ly_vecode);
         if (LYVE_PATH_EXISTS == ly_vecode) {
@@ -418,17 +431,12 @@ rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const
     }
 
     /* remove default tag if the default value has been explicitly set or overwritten */
-    if (sch_node->nodetype == LYS_LEAF && ((struct lys_node_leaf *) sch_node)->dflt != NULL) {
+    if (SR_ERR_OK == rc && sch_node->nodetype == LYS_LEAF && ((struct lys_node_leaf *) sch_node)->dflt != NULL) {
         if (NULL == node) {
             rc = rp_dt_find_node(dm_ctx, info->node, xpath, dm_is_running_ds_session(session), &node);
             CHECK_RC_LOG_GOTO(rc, cleanup, "Created node %s not found", xpath);
         }
         node->dflt = 0;
-    }
-
-    /* add default nodes into the data tree */
-    if (node != NULL) {
-        dm_lyd_wd_add(dm_ctx, module->ctx, &info->node, LYD_WD_IMPL_TAG | LYD_OPT_NOSIBLINGS);
     }
 
 cleanup:
@@ -446,14 +454,16 @@ rp_dt_move_list(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, sr_m
     int rc = SR_ERR_OK;
     struct lyd_node *node = NULL;
     struct lyd_node *sibling = NULL;
-    const struct lys_module *module = NULL;
+    dm_schema_info_t *schema_info = NULL;
     dm_data_info_t *info = NULL;
 
-    rc = rp_dt_validate_node_xpath(dm_ctx, session, xpath, &module, NULL);
+    rc = rp_dt_validate_node_xpath_lock(dm_ctx, session, xpath, &schema_info, NULL);
     CHECK_RC_LOG_RETURN(rc, "Requested node is not valid %s", xpath);
 
-    rc = dm_get_data_info(dm_ctx, session, module->name, &info);
+    rc = dm_get_data_info(dm_ctx, session, schema_info->module_name, &info);
+    pthread_rwlock_unlock(&schema_info->model_lock);
     CHECK_RC_LOG_RETURN(rc, "Getting data tree failed for xpath '%s'", xpath);
+
 
     rc = rp_dt_find_node(dm_ctx, info->node, xpath, dm_is_running_ds_session(session), &node);
     if (SR_ERR_NOT_FOUND == rc) {
@@ -479,7 +489,7 @@ rp_dt_move_list(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, sr_m
             return rc;
         }
     } else {
-        struct ly_set *siblings = dm_lyd_get_node2(dm_ctx, info->node, node->schema);
+        struct ly_set *siblings = lyd_find_instance(info->node, node->schema);
 
         if (NULL == siblings || 0 == siblings->number) {
             SR_LOG_ERR_MSG("No siblings found");
@@ -658,70 +668,108 @@ rp_dt_replay_operations(dm_ctx_t *ctx, dm_session_t *session, dm_sess_op_t *oper
 }
 
 int
-rp_dt_commit(rp_ctx_t *rp_ctx, rp_session_t *session, sr_error_info_t **errors, size_t *err_cnt)
+rp_dt_commit(rp_ctx_t *rp_ctx, rp_session_t *session, dm_commit_context_t *c_ctx, sr_error_info_t **errors, size_t *err_cnt)
 {
-    CHECK_NULL_ARG4(rp_ctx, session, errors, err_cnt);
     int rc = SR_ERR_OK;
-    dm_commit_context_t *commit_ctx = NULL;
-
-    SR_LOG_DBG_MSG("Commit (1/7): process stared");
-
-    //TODO send validate notifications
-
-    /* YANG validation */
-    rc = dm_validate_session_data_trees(rp_ctx->dm_ctx, session->dm_session, errors, err_cnt);
+    CHECK_NULL_ARG_NORET4(rc, rp_ctx, session, errors, err_cnt);
     if (SR_ERR_OK != rc) {
-        SR_LOG_ERR("Data validation failed: %s", *err_cnt > 0 ? errors[0]->message : "(no error)");
-        return SR_ERR_VALIDATION_FAILED;
-    }
-    SR_LOG_DBG_MSG("Commit (2/7): validation succeeded");
-
-
-    rc = dm_commit_prepare_context(rp_ctx->dm_ctx, session->dm_session, &commit_ctx);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("commit prepare context failed");
+        if (NULL != c_ctx) {
+            pthread_mutex_unlock(&c_ctx->mutex);
+        }
         return rc;
-    } else if (0 == commit_ctx->modif_count) {
-        SR_LOG_DBG_MSG("Commit: Finished - no model modified");
-        dm_free_commit_context(commit_ctx);
-        return SR_ERR_OK;
     }
 
-    /* open all files */
-    rc = dm_commit_load_modified_models(rp_ctx->dm_ctx, session->dm_session, commit_ctx);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("Loading of modified models failed");
-        goto cleanup;
+    dm_commit_context_t *commit_ctx = c_ctx;
+    dm_commit_state_t state = NULL != commit_ctx ? commit_ctx->state : DM_COMMIT_STARTED;
+
+    while (state != DM_COMMIT_FINISHED) {
+        switch (state) {
+        case DM_COMMIT_STARTED:
+            SR_LOG_DBG_MSG("Commit (1/9): process started");
+            state = DM_COMMIT_VALIDATION;
+            break;
+        case DM_COMMIT_VALIDATION:
+            rc = dm_validate_session_data_trees(rp_ctx->dm_ctx, session->dm_session, errors, err_cnt);
+            if (SR_ERR_OK != rc) {
+                SR_LOG_ERR("Data validation failed: %s", *err_cnt > 0 ? errors[0]->message : "(no error)");
+                return SR_ERR_VALIDATION_FAILED;
+            }
+            SR_LOG_DBG_MSG("Commit (2/9): validation succeeded");
+            state = DM_COMMIT_LOAD_MODIFIED_MODELS;
+            break;
+        case DM_COMMIT_LOAD_MODIFIED_MODELS:
+            rc = dm_commit_prepare_context(rp_ctx->dm_ctx, session->dm_session, &commit_ctx);
+            CHECK_RC_MSG_RETURN(rc, "commit prepare context failed");
+            if (0 == commit_ctx->modif_count) {
+                SR_LOG_DBG_MSG("Commit: Finished - no model modified");
+                dm_free_commit_context(commit_ctx);
+                return SR_ERR_OK;
+            }
+            pthread_mutex_lock(&commit_ctx->mutex);
+            /* open all files */
+            rc = dm_commit_load_modified_models(rp_ctx->dm_ctx, session->dm_session, commit_ctx,
+                    errors, err_cnt);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Loading of modified models failed");
+            SR_LOG_DBG_MSG("Commit (3/9): all modified models loaded successfully");
+            state = DM_COMMIT_REPLAY_OPS;
+            break;
+        case DM_COMMIT_REPLAY_OPS:
+            rc = rp_dt_replay_operations(rp_ctx->dm_ctx, commit_ctx->session, commit_ctx->operations,
+                commit_ctx->oper_count, false, commit_ctx->up_to_date_models);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Replay of operations failed");
+            SR_LOG_DBG_MSG("Commit (4/9): replay of operation succeeded");
+            state = DM_COMMIT_VALIDATE_MERGED;
+            break;
+        case DM_COMMIT_VALIDATE_MERGED:
+            rc = dm_validate_session_data_trees(rp_ctx->dm_ctx, commit_ctx->session, errors, err_cnt);
+            if (SR_ERR_OK != rc) {
+                SR_LOG_ERR_MSG("Validation after merging failed");
+                rc = SR_ERR_VALIDATION_FAILED;
+                goto cleanup;
+            }
+            SR_LOG_DBG_MSG("Commit (5/9): merged models validation succeeded");
+            state = DM_COMMIT_NOTIFY_VERIFY;
+            break;
+        case DM_COMMIT_NOTIFY_VERIFY:
+            commit_ctx->init_session = session;
+            rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, SR_EV_VERIFY, commit_ctx);
+            CHECK_RC_MSG_GOTO(rc, cleanup, "Sending of verify notifications failed");
+            state = commit_ctx->state;
+            SR_LOG_DBG_MSG("Commit (6/9): verify phase done");
+            break;
+        case DM_COMMIT_WAIT_FOR_NOTIFICATIONS:
+            SR_LOG_DBG("Commit %"PRIu32" processing paused waiting for replies from verifiers", commit_ctx->id);
+            session->state = RP_REQ_WAITING_FOR_VERIFIERS;
+            pthread_mutex_unlock(&commit_ctx->mutex);
+            return rc;
+        case DM_COMMIT_WRITE:
+            rc = dm_commit_write_files(session->dm_session, commit_ctx);
+            if (SR_ERR_OK == rc) {
+                SR_LOG_DBG_MSG("Commit (7/9): data write succeeded");
+            }
+            state = DM_COMMIT_NOTIFY_APPLY;
+            break;
+        case DM_COMMIT_NOTIFY_APPLY:
+            rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, SR_EV_APPLY, commit_ctx);
+            state = DM_COMMIT_FINISHED;
+            SR_LOG_DBG_MSG("Commit (8/9): apply notifications sent");
+            break;
+        case DM_COMMIT_NOTIFY_ABORT:
+            rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, SR_EV_ABORT, commit_ctx);
+            session->state = RP_REQ_FINISHED;
+            *errors = c_ctx->errors;
+            *err_cnt = c_ctx->err_cnt;
+            c_ctx->errors = NULL;
+            c_ctx->err_cnt = 0;
+            pthread_mutex_unlock(&commit_ctx->mutex);
+            SR_LOG_DBG_MSG("Commit (8/9): abort notifications sent");
+            return SR_ERR_OPERATION_FAILED;
+        default:
+            break;
+        }
     }
-    SR_LOG_DBG_MSG("Commit (3/7): all modified models loaded successfully");
-
-    /* replay operations */
-    rc = rp_dt_replay_operations(rp_ctx->dm_ctx, commit_ctx->session, commit_ctx->operations,
-            commit_ctx->oper_count, false, commit_ctx->up_to_date_models);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("Replay of operations failed");
-        goto cleanup;
-    }
-    SR_LOG_DBG_MSG("Commit (4/7): replay of operation succeeded");
-
-    /* validate data trees after merge */
-    rc = dm_validate_session_data_trees(rp_ctx->dm_ctx, commit_ctx->session, errors, err_cnt);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_ERR_MSG("Validation after merging failed");
-        rc = SR_ERR_VALIDATION_FAILED;
-        goto cleanup;
-    }
-    SR_LOG_DBG_MSG("Commit (5/7): merged models validation succeeded");
-
-    rc = dm_commit_write_files(session->dm_session, commit_ctx);
-
-    if (SR_ERR_OK == rc) {
-        SR_LOG_DBG_MSG("Commit (6/7): data write succeeded");
-
-        rc = dm_commit_notify(rp_ctx->dm_ctx, session->dm_session, commit_ctx);
-    }
-
 cleanup:
+    pthread_mutex_unlock(&commit_ctx->mutex);
     /* In case of running datastore, commit context will be freed when
      * all notifications session are closed.
      */
@@ -737,7 +785,7 @@ cleanup:
             dm_remove_session_operations(session->dm_session);
             rc = dm_remove_modified_flag(session->dm_session);
         }
-        SR_LOG_DBG_MSG("Commit (7/7): finished successfully");
+        SR_LOG_DBG_MSG("Commit (9/9): finished successfully");
     }
     return rc;
 }
@@ -872,9 +920,9 @@ rp_dt_copy_config_to_running(rp_ctx_t* rp_ctx, rp_session_t* session, const char
         rc = dm_get_all_modules(rp_ctx->dm_ctx, session->dm_session, true, &modules);
         CHECK_RC_MSG_GOTO(rc, cleanup, "Get all modules failed");
         for (size_t i = 0; i < modules->count; i++) {
-            struct lys_module *module = modules->data[i];
-            rc = dm_get_data_info(rp_ctx->dm_ctx, session->dm_session, module->name, &info);
-            CHECK_RC_LOG_GOTO(rc, cleanup, "Get data info failed %s", module->name);
+            char *module = modules->data[i];
+            rc = dm_get_data_info(rp_ctx->dm_ctx, session->dm_session, module, &info);
+            CHECK_RC_LOG_GOTO(rc, cleanup, "Get data info failed %s", module);
             info->modified = true;
         }
 
@@ -887,7 +935,7 @@ rp_dt_copy_config_to_running(rp_ctx_t* rp_ctx, rp_session_t* session, const char
         CHECK_RC_MSG_GOTO(rc, cleanup, "Data tree move failed");
     }
     /* commit */
-    rc = rp_dt_commit(rp_ctx, session, &errors, &e_cnt);
+    rc = rp_dt_commit(rp_ctx, session, NULL, &errors, &e_cnt);
     sr_free_errors(errors, e_cnt);
 
 cleanup:
