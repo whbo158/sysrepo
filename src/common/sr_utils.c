@@ -980,7 +980,6 @@ sr_libyang_leaf_copy_value(const struct lyd_node_leaf_list *leaf, sr_val_t *valu
     CHECK_NULL_ARG2(leaf, value);
     int rc = SR_ERR_OK;
     struct lys_type *actual_type = NULL;
-    const struct lyd_node_leaf_list *leafref = NULL;
     LY_DATA_TYPE type = leaf->value_type;
     const char *node_name = "(unknown)";
     if (NULL != leaf->schema && NULL != leaf->schema->name) {
@@ -1055,13 +1054,7 @@ sr_libyang_leaf_copy_value(const struct lyd_node_leaf_list *leaf, sr_val_t *valu
         }
         return SR_ERR_INTERNAL;
     case LY_TYPE_LEAFREF:
-        leafref = (const struct lyd_node_leaf_list *) leaf->value.leafref;
-        if (NULL != leafref) {
-            return sr_libyang_leaf_copy_value(leafref, value);
-        } else {
-            return sr_libyang_val_str_to_sr_val(leaf->value_str, value->type, value);
-        }
-        return SR_ERR_OK;
+        return sr_libyang_val_str_to_sr_val(leaf->value_str, value->type, value);
     case LY_TYPE_STRING:
         if (NULL != leaf->value.string) {
             sr_mem_edit_string(value->_sr_mem, &value->data.string_val, leaf->value.string);
@@ -2161,4 +2154,29 @@ sr_mkdir_recursive(const char *path, mode_t mode)
     }
 
     return 0;
+}
+
+bool
+sr_lys_module_has_data(const struct lys_module *module)
+{
+    struct lys_node *iter = NULL;
+
+    if (!module) {
+        return false;
+    }
+
+    /* submodules don't have data tree, the data nodes are placed in the main module altogether */
+    if (module->type) {
+        return false;
+    }
+
+    /* iterate through top-level nodes */
+    LY_TREE_FOR(module->data, iter) {
+        if (((LYS_CONFIG_R & iter->flags) /* operational data */ ||
+             ((LYS_CONTAINER | LYS_LIST | LYS_LEAF | LYS_LEAFLIST | LYS_CHOICE | LYS_RPC | LYS_NOTIF | LYS_ACTION) & iter->nodetype))) {
+            /* data-carrying */
+            return true;
+        }
+    }
+    return false;
 }

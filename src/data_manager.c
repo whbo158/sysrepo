@@ -589,6 +589,9 @@ dm_load_module(dm_ctx_t *dm_ctx, const char *module_name, const char *revision, 
         ll_node = ll_node->next;
     }
 
+    /* distinguish between modules that can and cannot be locked */
+    si->can_not_be_locked = !module->has_data;
+
     /* insert schema info into schema tree */
     RWLOCK_WRLOCK_TIMED_CHECK_GOTO(&dm_ctx->schema_tree_lock, rc, cleanup);
 
@@ -827,6 +830,11 @@ dm_lock_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *modul_name)
     /* check if module name is valid */
     rc = dm_get_module_and_lock(dm_ctx, modul_name, &si);
     CHECK_RC_LOG_RETURN(rc, "Unknown module %s to lock", modul_name);
+
+    if (si->can_not_be_locked) {
+        SR_LOG_DBG("Module %s contains no data, locking for the module is no operation.", modul_name);
+        goto cleanup;
+    }
 
     rc = sr_get_lock_data_file_name(dm_ctx->data_search_dir, modul_name, session->datastore, &lock_file);
     CHECK_RC_MSG_GOTO(rc, cleanup, "Lock file name can not be created");
@@ -1300,6 +1308,8 @@ dm_append_data_tree(dm_ctx_t *dm_ctx, dm_session_t *session, dm_data_info_t *dat
         } else if (NULL != tmp_node) {
             ret = lyd_merge(data_info->node, tmp_node, LYD_OPT_EXPLICIT);
             lyd_free_withsiblings(tmp_node);
+            CHECK_ZERO_LOG_RETURN(ret, SR_ERR_INTERNAL, "Failed to merge data of module %s into the data tree of module %s: %s",
+                    di->schema->module->name, data_info->schema->module->name, ly_errmsg());
         }
     } else {
         SR_LOG_DBG("Dependant module %s is empty", di->schema->module->name);
@@ -3093,7 +3103,17 @@ dm_commit_notify(dm_ctx_t *dm_ctx, dm_session_t *session, sr_notif_event_t ev, d
                 continue;
             }
 
+            /* remove changes generated during verify phase */
+            if (NULL != ms->changes) {
+                for (int i = 0; i < ms->changes->count; i++) {
+                    sr_free_changes(ms->changes->data[i], 1);
+                }
+                sr_list_cleanup(ms->changes);
+            }
+            ms->changes = NULL;
+
             lyd_free_diff(ms->difflist);
+            ms->changes_generated = false;
             /* store differences in commit context */
             ms->difflist = diff;
         }
