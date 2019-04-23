@@ -32,6 +32,7 @@
 /**
  * @brief Retrieves all nodes matching xpath using ::rp_dt_find_nodes and copy fills sr_val_t structures.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
@@ -40,13 +41,14 @@
  * @param [out] count
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_values(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable,
+int rp_dt_get_values(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable,
         sr_val_t **values, size_t *count);
 
 /**
  * @brief Returns the value for the specified xpath. If more than one node matching xpath,
  * SR_ERR_INVAL_ARG is returned.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
@@ -54,7 +56,8 @@ int rp_dt_get_values(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_
  * @param [out] value
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_value(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable, sr_val_t **value);
+int rp_dt_get_value(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem,
+        const char *xpath, bool check_enable, sr_val_t **value);
 
 /**
  * @brief Returns the value for the specified xpath.
@@ -84,7 +87,7 @@ int rp_dt_get_values_wrapper(rp_ctx_t *rp_ctx, rp_session_t *rp_session, sr_mem_
  * to identify the matching nodes. The selection of returned values can be specified by limit and offset.
  * @param [in] rp_ctx
  * @param [in] rp_session
- * @param [in] get_items_ctx\
+ * @param [in] get_items_ctx
  * @param [in] sr_mem
  * @param [in] xpath
  * @param [in] offset - return the values with index and above
@@ -111,6 +114,7 @@ int rp_dt_get_values_from_nodes(sr_mem_ctx_t *sr_mem, struct ly_set *nodes, sr_v
  * @brief Returns subtree with the root node at the specified xpath. If more than one node matching xpath,
  * SR_ERR_INVAL_ARG is returned.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
@@ -118,12 +122,13 @@ int rp_dt_get_values_from_nodes(sr_mem_ctx_t *sr_mem, struct ly_set *nodes, sr_v
  * @param [out] subtree
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_subtree(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable, sr_node_t **subtree);
+int rp_dt_get_subtree(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable, sr_node_t **subtree);
 
 /**
  * @brief Returns subtree *chunk* with the root node at the specified xpath. If more than one node matching xpath,
  * SR_ERR_INVAL_ARG is returned.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
@@ -136,27 +141,29 @@ int rp_dt_get_subtree(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem
  * @param [out] chunk_id
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_subtree_chunk(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath,
+int rp_dt_get_subtree_chunk(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath,
     size_t slice_offset, size_t slice_width, size_t child_limit, size_t depth_limit, bool check_enable,
     sr_node_t **chunk, char **chunk_id);
 
 /**
  * @brief Retrieves all subtrees with root nodes matching the specified xpath.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
  * @param [in] check_enable
- * @param [out] values
+ * @param [out] subtrees
  * @param [out] count
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_subtrees(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath, bool check_enable,
-        sr_node_t **subtrees, size_t *count);
+int rp_dt_get_subtrees(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem,
+                       const char *xpath, bool check_enable, sr_node_t **subtrees, size_t *count);
 
 /**
  * @brief Retrieves all subtree *chunks* with root nodes matching the specified xpath.
  * @param [in] dm_ctx
+ * @param [in] rp_session
  * @param [in] data_tree
  * @param [in] sr_mem
  * @param [in] xpath
@@ -165,12 +172,12 @@ int rp_dt_get_subtrees(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_me
  * @param [in] child_limit
  * @param [in] depth_limit
  * @param [in] check_enable
- * @param [out] values
+ * @param [out] chunks
  * @param [out] count
  * @param [out] chunk_ids
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_get_subtrees_chunks(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath,
+int rp_dt_get_subtrees_chunks(dm_ctx_t *dm_ctx, rp_session_t *rp_session, struct lyd_node *data_tree, sr_mem_ctx_t *sr_mem, const char *xpath,
     size_t slice_offset, size_t slice_width, size_t child_limit, size_t depth_limit, bool check_enable, sr_node_t **chunks,
     size_t *count, char ***chunk_ids);
 
@@ -266,6 +273,23 @@ int rp_dt_get_changes(rp_ctx_t *rp_ctx, rp_session_t *session, dm_commit_context
 int rp_dt_remove_loaded_state_data(rp_ctx_t *rp_ctx, rp_session_t *rp_session);
 
 /**
+ * @brief Loads configuration data and asks for state data if needed. Request
+ * can enter this function in RP_REQ_NEW state or RP_REQ_FINISHED.
+ *
+ * In RP_REQ_NEW state saves the data tree name into session.
+ *
+ * @param [in] rp_ctx
+ * @param [in] rp_session
+ * @param [in] xpath
+ * @param [in] api_variant
+ * @param [in] tree_depth_limit
+ * @param [out] data_tree Optional.
+ * @return Error code (SR_ERR_OK on success)
+ */
+int rp_dt_prepare_data(rp_ctx_t *rp_ctx, rp_session_t *rp_session, const char *xpath, sr_api_variant_t api_variant,
+        size_t tree_depth_limit,  struct lyd_node **data_tree);
+
+/**
  * @brief Frees state data context.
  */
 void rp_dt_free_state_data_ctx_content (rp_state_data_ctx_t *state_data);
@@ -273,11 +297,41 @@ void rp_dt_free_state_data_ctx_content (rp_state_data_ctx_t *state_data);
 /**
  * @brief Function tests whether node is located under(in schema hierarchy) subtree node.
  * @param [in] subtree
- * @param [in] depth_limit Maximum number of subtree levels to consider.
  * @param [in] node
+ * @param [out] depth - number of nodes between subtree and node if they are the same depth is 0
  * @return bool result of the test
  */
-bool rp_dt_is_under_subtree(struct lys_node *subtree, size_t depth_limit, struct lys_node *node);
+bool rp_dt_depth_under_subtree(struct lys_node *subtree, struct lys_node *node, size_t *depth);
+
+/**
+ * @brief Tries to find a subscription that covers the subtree either exact match or a subscription
+ * to a parent node.
+ * @param [in] rp_session
+ * @param [in] subtree_node
+ * @param [out] found_index
+ * @return bool result whether a subscription was found
+ */
+bool rp_dt_find_subscription_covering_subtree(rp_session_t *rp_session, struct lys_node *subtree_node, size_t *found_index);
+
+/**
+ * @brief Similar to the ::rp_dt_find_subscription_covering_subtree however looks up
+ * only exact match
+ * @param [in] rp_session
+ * @param [in] node
+ * @param [out] found_index
+ * @return result
+ */
+bool rp_dt_find_exact_match_subscription_for_node(rp_session_t *rp_session, struct lys_node *node, size_t *found_index);
+
+/**
+ * @brief Function create xpath for the found instances of the schema node
+ * @param [in] session
+ * @param [in] sch_node
+ * @param [out] xps - created xpaths
+ * @param [out] xp_count
+ * @return Error code (SR_ERR_OK on success)
+ */
+int rp_dt_create_instance_xps(rp_session_t *session, struct lys_node *sch_node, char ***xps, size_t *xp_count);
 
 #endif /* RP_DT_GET_H */
 

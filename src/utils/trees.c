@@ -20,15 +20,14 @@
  * limitations under the License.
  */
 
+#include <unistd.h>
+#include <stdarg.h>
+
 #include "sr_common.h"
 #include "client_library.h"
 #include "sysrepo/trees.h"
 #include "values_internal.h"
 #include "trees_internal.h"
-
-#include <stdarg.h>
-
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /**
  * @brief Allocate a new instance of a sysrepo node over an existing sysrepo memory context.
@@ -115,7 +114,6 @@ sr_new_tree(const char *name, const char *module_name, sr_node_t **node_p)
     return sr_new_tree_ctx(NULL, name, module_name, node_p);
 }
 
-
 /**
  * @brief Create a new array of sysrepo trees.
  */
@@ -170,6 +168,57 @@ sr_new_trees(size_t count, sr_node_t **trees_p)
 }
 
 int
+sr_realloc_trees(size_t old_tree_cnt, size_t new_tree_cnt, sr_node_t **trees_p)
+{
+    int ret = SR_ERR_OK;
+    bool new_ctx = false;
+    sr_node_t *trees = NULL;
+    sr_mem_ctx_t *sr_mem = NULL;
+
+    CHECK_NULL_ARG(trees_p);
+
+    if (0 == new_tree_cnt) {
+        *trees_p = NULL;
+        return SR_ERR_OK;
+    }
+
+    if (0 == old_tree_cnt) {
+        ret = sr_mem_new((sizeof *trees) * new_tree_cnt, &sr_mem);
+        CHECK_RC_MSG_RETURN(ret, "Failed to obtain new sysrepo memory.");
+        new_ctx = true;
+    } else {
+        sr_mem = trees_p[0]->_sr_mem;
+    }
+
+    trees = (sr_node_t *)sr_realloc(sr_mem, *trees_p, old_tree_cnt * sizeof *trees, new_tree_cnt * sizeof *trees);
+    if (NULL == trees) {
+        if (new_ctx) {
+            if (sr_mem) {
+                sr_mem_free(sr_mem);
+            } else {
+                free(trees);
+            }
+        }
+        return SR_ERR_INTERNAL;
+    }
+
+    /* zero the new memory */
+    memset(trees + old_tree_cnt, 0, (new_tree_cnt - old_tree_cnt) * sizeof *trees);
+
+    if (sr_mem) {
+        for (size_t i = old_tree_cnt; i < new_tree_cnt; ++i) {
+            trees[i]._sr_mem = sr_mem;
+        }
+        if (0 == old_tree_cnt) {
+            sr_mem->obj_count += 1; /* 1 for the entire array */
+        }
+    }
+
+    *trees_p = trees;
+    return SR_ERR_OK;
+}
+
+int
 sr_node_set_name(sr_node_t *node, const char *name)
 {
     CHECK_NULL_ARG2(node, name);
@@ -184,9 +233,24 @@ sr_node_set_module(sr_node_t *node, const char *module_name)
 }
 
 int
-sr_node_set_string(sr_node_t *node, const char *string_val)
+sr_node_set_str_data(sr_node_t *node, sr_type_t type, const char *string_val)
 {
-    return sr_val_set_string((sr_val_t *)node, string_val);
+    return sr_val_set_str_data((sr_val_t *)node, type, string_val);
+}
+
+int
+sr_node_build_str_data(sr_node_t *node, sr_type_t type, const char *format, ...)
+{
+    va_list arg_list;
+    int rc = SR_ERR_OK;
+
+    CHECK_NULL_ARG2(node, format);
+
+    va_start(arg_list, format);
+    rc = sr_val_build_str_data_va((sr_val_t *)node, type, format, arg_list);
+    va_end(arg_list);
+
+    return rc;
 }
 
 /**
@@ -234,7 +298,7 @@ sr_node_add_child(sr_node_t *parent, const char *child_name, const char *child_m
  * @brief Recursivelly duplicate sysrepo tree.
  */
 static int
-sr_dup_tree_recursive(sr_mem_ctx_t *sr_mem, sr_node_t *tree, size_t depth, sr_node_t **tree_dup_p, sr_node_t **iterator_p)
+sr_dup_tree_recursive(sr_mem_ctx_t *sr_mem, const sr_node_t *tree, size_t depth, sr_node_t **tree_dup_p, sr_node_t **iterator_p)
 {
     int rc = SR_ERR_OK;
     sr_node_t *tree_dup = NULL, *child = NULL, *child_dup = NULL;
@@ -289,20 +353,20 @@ cleanup:
 }
 
 int
-sr_dup_tree_ctx(sr_node_t *tree, sr_mem_ctx_t *sr_mem_dest, sr_node_t **tree_dup_p)
+sr_dup_tree_ctx(const sr_node_t *tree, sr_mem_ctx_t *sr_mem_dest, sr_node_t **tree_dup_p)
 {
     sr_node_t *iterator = NULL;
     return sr_dup_tree_recursive(sr_mem_dest, tree, 0, tree_dup_p, &iterator);
 }
 
 int
-sr_dup_tree(sr_node_t *tree, sr_node_t **tree_dup_p)
+sr_dup_tree(const sr_node_t *tree, sr_node_t **tree_dup_p)
 {
     return sr_dup_tree_ctx(tree, NULL, tree_dup_p);
 }
 
 int
-sr_dup_trees_ctx(sr_node_t *trees, size_t count, sr_mem_ctx_t *sr_mem_dest, sr_node_t **trees_dup_p)
+sr_dup_trees_ctx(const sr_node_t *trees, size_t count, sr_mem_ctx_t *sr_mem_dest, sr_node_t **trees_dup_p)
 {
     int rc = SR_ERR_OK;
     sr_node_t *trees_dup = NULL, *child = NULL, *child_dup = NULL;
@@ -346,65 +410,9 @@ cleanup:
 }
 
 int
-sr_dup_trees(sr_node_t *trees, size_t count, sr_node_t **trees_dup_p)
+sr_dup_trees(const sr_node_t *trees, size_t count, sr_node_t **trees_dup_p)
 {
     return sr_dup_trees_ctx(trees, count, NULL, trees_dup_p);
-}
-
-/**
- * @brief Construct string according to the format and the extra arguments, and then
- * print it in the given context.
- *
- * @param [in] print_ctx Print context to use for printing.
- * @param [in] format Format string followed by corresponding set of extra arguments.
- */
-static int
-sr_print(sr_print_ctx_t *print_ctx, const char *format, ...)
-{
-    int rc = SR_ERR_OK, count = 0, len = 0;
-    char *str = NULL, *aux = NULL;
-    size_t new_size;
-    va_list va;
-
-    CHECK_NULL_ARG2(print_ctx, format);
-
-    va_start(va, format);
-
-    switch (print_ctx->type) {
-        case SR_PRINT_FD:
-            count = vdprintf(print_ctx->method.fd, format, va);
-            CHECK_NOT_MINUS1_MSG_GOTO(count, rc, SR_ERR_INTERNAL, cleanup, "vdprintf failed");
-            break;
-        case SR_PRINT_STREAM:
-            count = vfprintf(print_ctx->method.stream, format, va);
-            CHECK_NOT_MINUS1_MSG_GOTO(count, rc, SR_ERR_INTERNAL, cleanup, "vfprintf failed");
-            break;
-        case SR_PRINT_MEM:
-            /* print string to a temporary memory buffer */
-            len = vsnprintf(NULL, 0, format, va);
-            str = calloc(len+1, sizeof *str);
-            CHECK_NULL_NOMEM_GOTO(str, rc, cleanup);
-            va_end(va); /**< restart va_list */
-            va_start(va, format);
-            count = vsnprintf(str, len+1, format, va);
-            CHECK_NOT_MINUS1_MSG_GOTO(count, rc, SR_ERR_INTERNAL, cleanup, "vsnprintf failed");
-            /* append the string to already printed data */
-            if (print_ctx->method.mem.len + count + 1 > print_ctx->method.mem.size) {
-                new_size = MAX(2 * print_ctx->method.mem.size, print_ctx->method.mem.len + count + 1);
-                aux = realloc(print_ctx->method.mem.buf, new_size * sizeof *aux);
-                CHECK_NULL_NOMEM_GOTO(aux, rc, cleanup);
-                print_ctx->method.mem.buf = aux;
-                print_ctx->method.mem.size = new_size;
-            }
-            strcpy(print_ctx->method.mem.buf + print_ctx->method.mem.len, str);
-            print_ctx->method.mem.len += count;
-            break;
-    }
-
-cleanup:
-    free(str);
-    va_end(va);
-    return rc;
 }
 
 /**
@@ -414,71 +422,32 @@ cleanup:
  * @param [in] node Sysrepo tree node to print.
  */
 static int
-sr_print_node(sr_print_ctx_t *print_ctx, sr_node_t *node)
+sr_print_node(sr_print_ctx_t *print_ctx, const sr_node_t *node)
 {
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG2(print_ctx, node);
 
     if (node->module_name && 0 < strlen(node->module_name)) {
-        rc = sr_print(print_ctx, "%s:%s ", node->module_name, node->name);
-    } else {
-        rc = sr_print(print_ctx, "%s ", node->name);
-    }
-    CHECK_RC_MSG_RETURN(rc, "Failed to print name of a sysrepo tree node");
-
-    switch (node->type) {
-    case SR_CONTAINER_T:
-    case SR_CONTAINER_PRESENCE_T:
-        rc = sr_print(print_ctx, "(container)\n");
-        break;
-    case SR_LIST_T:
-        rc = sr_print(print_ctx, "(list instance)\n");
-        break;
-    case SR_STRING_T:
-        rc = sr_print(print_ctx, "= %s\n", node->data.string_val);
-        break;
-    case SR_BOOL_T:
-        rc = sr_print(print_ctx, "= %s\n", node->data.bool_val ? "true" : "false");
-        break;
-    case SR_UINT8_T:
-        rc = sr_print(print_ctx, "= %u\n", node->data.uint8_val);
-        break;
-    case SR_UINT16_T:
-        rc = sr_print(print_ctx, "= %u\n", node->data.uint16_val);
-        break;
-    case SR_UINT32_T:
-        rc = sr_print(print_ctx, "= %u\n", node->data.uint32_val);
-        break;
-    case SR_IDENTITYREF_T:
-        rc = sr_print(print_ctx, "= %s\n", node->data.identityref_val);
-        break;
-    case SR_ENUM_T:
-        rc = sr_print(print_ctx, "= %s\n", node->data.enum_val);
-        break;
-    case SR_LEAF_EMPTY_T:
-        rc = sr_print(print_ctx, "(empty leaf)\n");
-        break;
-    default:
-        rc = sr_print(print_ctx, "(unprintable)\n");
+        rc = sr_print(print_ctx, "%s:", node->module_name);
+        CHECK_RC_MSG_RETURN(rc, "Failed to print module name of a sysrepo tree node");
     }
 
-    CHECK_RC_MSG_RETURN(rc, "Failed to print value of a sysrepo tree node");
-    return rc;
+    return sr_print_val_ctx(print_ctx, (const sr_val_t *)node);
 }
 
 /**
- * @brief Print sysrepo tree.
+ * @brief Print sysrepo tree in the given context.
  *
  * @param [in] print_ctx Context for printing.
  * @param [in] tree Sysrepo tree to print.
  * @param [in] depth_limit Maximum number of tree levels to print.
  */
 static int
-sr_print_tree(sr_print_ctx_t *print_ctx, sr_node_t *tree, int depth_limit)
+sr_print_tree_ctx(sr_print_ctx_t *print_ctx, const sr_node_t *tree, int depth_limit)
 {
     int rc = SR_ERR_OK;
-    sr_node_t *node = NULL, *pred = NULL, *parent = NULL;
+    const sr_node_t *node = NULL, *pred = NULL, *parent = NULL;
     char *indent = NULL, *aux = NULL, *cur = NULL;
     int indent_len = 0, new_len = 0;
     int depth = 0;
@@ -568,29 +537,40 @@ cleanup:
 }
 
 int
-sr_print_tree_fd(int fd, sr_node_t *tree, int depth_limit)
+sr_print_tree(const sr_node_t *tree, int depth_limit)
+{
+    sr_print_ctx_t print_ctx = { 0, };
+
+    print_ctx.type = SR_PRINT_STREAM;
+    print_ctx.method.stream = stdout;
+
+    return sr_print_tree_ctx(&print_ctx, tree, depth_limit);
+}
+
+int
+sr_print_tree_fd(int fd, const sr_node_t *tree, int depth_limit)
 {
     sr_print_ctx_t print_ctx = { 0, };
 
     print_ctx.type = SR_PRINT_FD;
     print_ctx.method.fd = fd;
 
-    return sr_print_tree(&print_ctx, tree, depth_limit);
+    return sr_print_tree_ctx(&print_ctx, tree, depth_limit);
 }
 
 int
-sr_print_tree_stream(FILE *stream, sr_node_t *tree, int depth_limit)
+sr_print_tree_stream(FILE *stream, const sr_node_t *tree, int depth_limit)
 {
     sr_print_ctx_t print_ctx = { 0, };
 
     print_ctx.type = SR_PRINT_STREAM;
     print_ctx.method.stream = stream;
 
-    return sr_print_tree(&print_ctx, tree, depth_limit);
+    return sr_print_tree_ctx(&print_ctx, tree, depth_limit);
 }
 
 int
-sr_print_tree_mem(char **mem_p, sr_node_t *tree, int depth_limit)
+sr_print_tree_mem(char **mem_p, const sr_node_t *tree, int depth_limit)
 {
     int rc = SR_ERR_OK;
     sr_print_ctx_t print_ctx = { 0, };
@@ -602,7 +582,7 @@ sr_print_tree_mem(char **mem_p, sr_node_t *tree, int depth_limit)
     print_ctx.method.mem.len = 0;
     print_ctx.method.mem.size = 0;
 
-    rc = sr_print_tree(&print_ctx, tree, depth_limit);
+    rc = sr_print_tree_ctx(&print_ctx, tree, depth_limit);
     if (SR_ERR_OK == rc) {
         *mem_p = print_ctx.method.mem.buf;
     } else {

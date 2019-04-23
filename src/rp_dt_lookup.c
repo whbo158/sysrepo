@@ -24,28 +24,37 @@
 
 #include "rp_dt_lookup.h"
 #include "rp_dt_xpath.h"
+#include "rp_dt_filter.h"
 
 int
 rp_dt_find_nodes(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, const char *xpath, bool check_enable, struct ly_set **nodes)
 {
     CHECK_NULL_ARG3(dm_ctx, xpath, nodes);
     int rc = SR_ERR_OK;
+    struct lys_submodule *sub = NULL;
     if (NULL == data_tree) {
         return SR_ERR_NOT_FOUND;
     }
     CHECK_NULL_ARG3(data_tree->schema, data_tree->schema->module, data_tree->schema->module->name);
-    struct ly_set *res = lyd_find_xpath(data_tree, xpath);
+    if (data_tree->schema->module->type) {
+        sub = (struct lys_submodule *) data_tree->schema->module;
+        CHECK_NULL_ARG3(sub, sub->belongsto, sub->belongsto->name);
+    }
+    struct ly_set *res = lyd_find_path(data_tree, xpath);
     if (NULL == res) {
-        SR_LOG_ERR_MSG("Lyd get node failed");
+        SR_LOG_ERR_MSG("Lyd find path failed");
         return LY_EINVAL == ly_errno || LY_EVALID == ly_errno ? SR_ERR_INVAL_ARG : SR_ERR_INTERNAL;
     }
 
     if (check_enable) {
         /* lock ly_ctx_lock to schema_info_tree*/
+        /* for submodule lock the main module*/
+        const char *module_name = sub == NULL ? data_tree->schema->module->name : sub->belongsto->name;
+
         dm_schema_info_t *si = NULL;
-        rc = dm_get_module_and_lock((dm_ctx_t *) dm_ctx, data_tree->schema->module->name, &si);
+        rc = dm_get_module_and_lock((dm_ctx_t *) dm_ctx, module_name, &si);
         if (rc != SR_ERR_OK) {
-            SR_LOG_ERR("Get schema info failed for %s", data_tree->schema->module->name);
+            SR_LOG_ERR("Get schema info failed for %s", module_name);
             ly_set_free(res);
             return rc;
         }
@@ -92,10 +101,10 @@ rp_dt_find_node(const dm_ctx_t *dm_ctx, struct lyd_node *data_tree, const char *
 }
 
 int
-rp_dt_find_nodes_with_opts(const dm_ctx_t *dm_ctx, dm_session_t *dm_session, rp_dt_get_items_ctx_t *get_items_ctx, struct lyd_node *data_tree,
+rp_dt_find_nodes_with_opts(dm_ctx_t *dm_ctx, rp_session_t *rp_session, rp_dt_get_items_ctx_t *get_items_ctx, struct lyd_node *data_tree,
         const char *xpath, size_t offset, size_t limit, struct ly_set **nodes)
 {
-    CHECK_NULL_ARG5(dm_ctx, dm_session, get_items_ctx, data_tree, xpath);
+    CHECK_NULL_ARG5(dm_ctx, rp_session, get_items_ctx, data_tree, xpath);
     CHECK_NULL_ARG(nodes);
 
     int rc = SR_ERR_OK;
@@ -107,7 +116,8 @@ rp_dt_find_nodes_with_opts(const dm_ctx_t *dm_ctx, dm_session_t *dm_session, rp_
             offset != get_items_ctx->offset) {
         ly_set_free(get_items_ctx->nodes);
         get_items_ctx->nodes = NULL;
-        rc = rp_dt_find_nodes(dm_ctx, data_tree, xpath, dm_is_running_ds_session(dm_session), &get_items_ctx->nodes);
+        rc = rp_dt_find_nodes(dm_ctx, data_tree, xpath, dm_is_running_ds_session(rp_session->dm_session),
+                &get_items_ctx->nodes);
 
         if (SR_ERR_OK != rc) {
             if (SR_ERR_NOT_FOUND != rc) {
@@ -126,13 +136,17 @@ rp_dt_find_nodes_with_opts(const dm_ctx_t *dm_ctx, dm_session_t *dm_session, rp_
         }
         get_items_ctx->offset = offset;
 
+        /* filter nodes by read access */
+        rc = rp_dt_nacm_filtering(dm_ctx, rp_session, data_tree, get_items_ctx->nodes->set.d,
+                &get_items_ctx->nodes->number);
+        CHECK_RC_MSG_RETURN(rc, "Failed to filter nodes by NACM read access.");
+
         SR_LOG_DBG_MSG("Cache miss in get_nodes_with_opts");
 
     } else {
         cache_hit = true;
         SR_LOG_DBG_MSG("Cache hit in get_nodes_with_opts");
     }
-
 
     size_t cnt = 0;
     /* setup index whether we continue using get_items_ctx or starting fresh */

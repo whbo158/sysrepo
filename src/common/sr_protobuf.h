@@ -341,12 +341,20 @@ Sr__NotificationEvent sr_notification_event_sr_to_gpb(sr_notif_event_t event);
 Sr__NotificationEvent sr_notification_event_str_to_gpb(const char *event_name);
 
 /**
- * @brief Converts notification event type from GPB to sysrepo type.
+ * @brief Converts notification event from GPB to sysrepo type.
  *
- * @param[in] event GPB notification event type.
+ * @param[in] event GPB notification event.
  * @return Sysrepo notification event type.
  */
 sr_notif_event_t sr_notification_event_gpb_to_sr(Sr__NotificationEvent event);
+
+/**
+ * @brief Converts event notification type from GPB to sysrepo type.
+ *
+ * @param[in] ev_notif_type GPB event notification type.
+ * @return Sysrepo event notification type.
+ */
+sr_ev_notif_type_t sr_ev_notification_type_gpb_to_sr(Sr__EventNotifReq__NotifType ev_notif_type);
 
 /**
  * @brief Converts Sysrepo API variant type to its GPB enum representation.
@@ -363,6 +371,29 @@ Sr__ApiVariant sr_api_variant_sr_to_gpb(sr_api_variant_t api_variant);
  * @return Sysrepo API variant type.
  */
 sr_api_variant_t sr_api_variant_gpb_to_sr(Sr__ApiVariant api_variant_gpb);
+
+/**
+ * @brief Converts module state type from sysrepo enum to string representation.
+ *
+ * @param[in] state Sysrepo module state type.
+ * @return Pointer to statically allocated string with the event type name.
+ */
+char *sr_module_state_sr_to_str(sr_module_state_t state);
+
+/**
+ * @brief Converts module state type from sysrepo enum to its GPB enum representation
+ * @param [in] state Syrepo module state type
+ * @return GPB module state type
+ */
+Sr__ModuleState sr_module_state_sr_to_gpb(sr_module_state_t state);
+
+/**
+ * @brief Converts module state type from GPB to sysrepo type.
+ *
+ * @param[in] state GPB module state type.
+ * @return Sysrepo module state type.
+ */
+sr_module_state_t sr_module_state_gpb_to_sr(Sr__ModuleState state);
 
 /**
  * @brief Converts array of sr_schema_t to an array of pointers to GPB schemas.

@@ -332,8 +332,11 @@ sm_connection_start(const sm_ctx_t *sm_ctx, const sm_connection_type_t type, con
     connection->type = type;
     connection->fd = fd;
 
-    /* set peer's effective uid and gid */
-    if (CM_AF_UNIX_SERVER != type) {
+    if (CM_AF_UNIX_SERVER == type) {
+        /* other side version was already verified, do not expect version-verification request */
+        connection->established = true;
+    } else { /* CM_AF_UNIX_CLIENT */
+        /* set peer's effective uid and gid */
         rc = sr_get_peer_eid(fd, &connection->uid, &connection->gid);
         if (SR_ERR_OK != rc) {
             SR_LOG_ERR_MSG("Cannot retrieve uid and gid of the peer.");
@@ -419,8 +422,8 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
         errno = 0;
         pws = getpwnam(effective_user);
         if (NULL == pws) {
-            SR_LOG_ERR("Cannot retrieve credentials of the effective user (%s): Invalid username?", effective_user);
-            rc = SR_ERR_INVAL_ARG;
+            SR_LOG_ERR("Cannot retrieve credentials of the effective user ('%s'): Invalid username?", effective_user);
+            rc = SR_ERR_INVAL_USER;
             goto cleanup;
         }
         session->credentials.e_username = strdup(effective_user);
@@ -437,6 +440,10 @@ sm_session_create(const sm_ctx_t *sm_ctx, sm_connection_t *connection,
     size_t attempts = 0;
     do {
         session->id = rand();
+        if (session->id == 0) {
+            /* reserved for internal use */
+            continue;
+        }
         if (NULL != sr_btree_search(sm_ctx->session_id_btree, session)) {
             session->id = SM_SESSION_ID_INVALID;
         }
@@ -483,9 +490,13 @@ sm_session_drop(const sm_ctx_t *sm_ctx, sm_session_t *session)
 
     SR_LOG_INF("Dropping session id=%"PRIu32".", session->id);
 
-    rc = sm_connection_remove_session(sm_ctx, session->connection, session);
-    if (SR_ERR_OK != rc) {
-        SR_LOG_WRN("Cannot remove the session from connection (id=%"PRIu32").", session->id);
+    /* connection can be NULL if this is a leftover session on an already-closed connection (it had some
+     * pending messages) */
+    if (session->connection) {
+        rc = sm_connection_remove_session(sm_ctx, session->connection, session);
+        if (SR_ERR_OK != rc) {
+            SR_LOG_WRN("Cannot remove the session from connection (id=%"PRIu32").", session->id);
+        }
     }
 
     sr_btree_delete(sm_ctx->session_id_btree, session); /* sm_session_cleanup auto-invoked */

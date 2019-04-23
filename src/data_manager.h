@@ -38,6 +38,7 @@
 #include "persistence_manager.h"
 #include "connection_manager.h"
 #include "module_dependencies.h"
+#include "nacm.h"
 
 /**
  * @brief number of supported data stores - length of arrays used in session
@@ -45,9 +46,45 @@
 #define DM_DATASTORE_COUNT 3
 
 /**
- * @brief Structure that holds the context of an instance of Data Manager.
+ * @brief Structure holds commit contexts for the purposes of notification
+ * session.
  */
-typedef struct dm_ctx_s dm_ctx_t;
+typedef struct dm_c_ctxs_s {
+    sr_btree_t *tree;      /**< Tree of commit context used for notifications */
+    pthread_rwlock_t lock; /**< rwlock to access c_ctxs */
+    pthread_mutex_t empty_mutex; /**< guards empty and commits_blocked */
+    pthread_cond_t empty_cond;   /**< can be used to wait for empty to be true */
+    bool empty;                  /**< flag that is set to true if there is no commit ctx stored */
+    bool commits_blocked;        /**< flag that decides whether a new commit context cane be inserted into the tree */
+} dm_commit_ctxs_t;
+
+/** defined in data_manager.c */
+typedef struct dm_tmp_ly_ctx_s dm_tmp_ly_ctx_t;
+
+/**
+ * @brief Data manager context holding loaded schemas, data trees
+ * and corresponding locks
+ */
+typedef struct dm_ctx_s {
+    ac_ctx_t *ac_ctx;             /**< Access Control module context */
+    np_ctx_t *np_ctx;             /**< Notification Processor context */
+    pm_ctx_t *pm_ctx;             /**< Persistence Manager context */
+    md_ctx_t *md_ctx;             /**< Module Dependencies context */
+    nacm_ctx_t *nacm_ctx;         /**< NACM context */
+    cm_connection_mode_t conn_mode;  /**< Mode in which Connection Manager operates */
+    char *schema_search_dir;      /**< location where schema files are located */
+    char *data_search_dir;        /**< location where data files are located */
+    sr_locking_set_t *locking_ctx;/**< lock context for lock/unlock/commit operations */
+    bool *ds_lock;                /**< Flags if the ds lock is hold by a session*/
+    pthread_mutex_t ds_lock_mutex;/**< Data store lock mutex */
+    sr_btree_t *schema_info_tree; /**< Binary tree holding information about schemas */
+    pthread_rwlock_t schema_tree_lock;  /**< rwlock for access schema_info_tree */
+    dm_commit_ctxs_t commit_ctxs; /**< Structure holding commit contexts and corresponding lock */
+    struct timespec last_commit_time;  /**< Time of the last commit */
+    dm_tmp_ly_ctx_t *tmp_ly_ctx;  /**< Structure wrapping libyang context that is used to validate/print/parse date
+                                   * where the set of required yang module can vary */
+
+} dm_ctx_t;
 
 /**
  * @brief Structure that holds Data Manager's per-session context.
@@ -74,6 +111,7 @@ typedef struct dm_schema_info_s {
                                          * during sysrepo-engine lifetime */
     const struct lys_module *module;    /**< Pointer to the module, might be NULL if module has been uninstalled*/
     bool cross_module_data_dependency;  /**< Flag whether data from different module is needed for validation */
+    bool has_instance_id;               /**< Flag whether the module contains a node of type instance identifier */
     bool can_not_be_locked;             /**< If true module contains no data and lock_module for the module is NOP */
 }dm_schema_info_t;
 
@@ -86,6 +124,7 @@ typedef struct dm_data_info_s{
     struct lyd_node *node;              /**< data tree */
     struct timespec timestamp;          /**< timestamp of this copy (used only if HAVE_ST_MTIM is defined) */
     bool modified;                      /**< flag denoting whether a change has been made*/
+    sr_list_t *required_modules;        /**< schemas that needs to be in context to print data */
 }dm_data_info_t;
 
 /**
@@ -111,10 +150,11 @@ typedef enum dm_operation_e {
  */
 typedef enum dm_commit_state_e {
     DM_COMMIT_STARTED,
-    DM_COMMIT_VALIDATION,
+    DM_COMMIT_LOAD_MODEL_DEPS,
     DM_COMMIT_LOAD_MODIFIED_MODELS,
     DM_COMMIT_REPLAY_OPS,
     DM_COMMIT_VALIDATE_MERGED,
+    DM_COMMIT_NACM,
     DM_COMMIT_NOTIFY_VERIFY,
     DM_COMMIT_WAIT_FOR_NOTIFICATIONS,
     DM_COMMIT_WRITE,
@@ -132,6 +172,7 @@ typedef struct dm_sess_op_s{
     union {
         struct set{
             sr_val_t *val;              /**< Value to perform operation with, can be NULL*/
+            char *str_val;              /**< Alternatively value in string form */
             sr_edit_options_t options;  /**< Operation edit options */
         } set;
         struct del{
@@ -150,14 +191,20 @@ typedef struct dm_sess_op_s{
  */
 typedef struct dm_model_subscription_s {
     dm_schema_info_t *schema_info;      /**< schema info identifying the module to which the subscriptions are tied to */
-    np_subscription_t **subscriptions;  /**< array of struct received from np */
+    sr_list_t *subscriptions;           /**< list of struct received from np */
     struct lys_node **nodes;            /**< array of schema nodes corresponding to the subscription */
-    size_t subscription_cnt;            /**< number of subscriptions */
     struct lyd_difflist *difflist;      /**< diff list */
     sr_list_t *changes;                 /**< set of changes for the model */
     bool changes_generated;             /**< Flag signalizing that changes has been generated */
     pthread_rwlock_t changes_lock;      /**< Lock guarding the changes member of structure */
 }dm_model_subscription_t;
+
+/**
+ * @brief A set of changes to be commited (returned by \b lyd_diff) */
+typedef struct dm_module_difflist_s {
+    dm_schema_info_t *schema_info;      /**< schema info identifying the module to which the difflist is tied to */
+    struct lyd_difflist *difflist;      /**< diff list */
+} dm_module_difflist_t;
 
 /**
  * @brief Structure holding information used during commit process
@@ -179,16 +226,14 @@ typedef struct dm_commit_context_s {
     sr_error_info_t *errors;    /**< errors returned by verifiers */
     size_t err_cnt;             /**< number of errors from verifiers */
     sr_list_t *err_subs_xpaths; /**< subscriptions that returned an error */
+    bool disabled_config_change;/**< flag whether config change notification are disabled */
+    sr_btree_t *difflists;      /**< binary tree of diff-lists for each modified module */
+    bool nacm_edited;           /**< flag whether the running NACM configuration was edited. */
+    bool in_btree;              /**< set to tree if the context was inserted into btree */
+    bool should_be_removed;     /**< flag denoting whether c_ctx can be removed from btree */
+    int result;                 /**< result of verify or apply commit phase */
+    dm_session_t *backup_session; /**< session with backed up modifications from before the commit */
 } dm_commit_context_t;
-
-/**
- * @brief Structure holds commit contexts for the purposes of notification
- * session.
- */
-typedef struct dm_c_ctxs_s {
-    sr_btree_t *tree;      /**< Tree of commit context used for notifications */
-    pthread_rwlock_t lock; /**< rwlock to access c_ctxs */
-} dm_commit_ctxs_t;
 
 /**
  * @brief End macro for data child iteration
@@ -221,12 +266,28 @@ typedef struct dm_c_ctxs_s {
         }                                                                     \
     }while(0)
 
+int dm_schema_info_init(const char *schema_search_dir, dm_schema_info_t **schema_info);
+
+void dm_free_schema_info(void *schema_info);
+
+int dm_load_schema_file(const char *schema_filepath, dm_schema_info_t *si, const struct lys_module **mod);
+
+int dm_load_module_ident_deps_r(md_module_t *module, dm_schema_info_t *si, sr_btree_t *loaded_deps);
+
+int dm_load_module_deps_r(md_module_t *module, dm_schema_info_t *si, sr_btree_t *loaded_deps);
+
+/**
+ * @brief The function is called to load the requested module into the context.
+ */
+const struct lys_module *dm_module_clb(struct ly_ctx *ctx, const char *name, const char *ns, int options, void *user_data);
+
 /**
  * @brief Initializes the data manager context, which will be passed in further
  * data manager related calls.
  * @param [in] ac_ctx Access Control module context
  * @param [in] np_ctx Notification Processor context
  * @param [in] pm_ctx Persistence Manager context
+ * @param [in] conn_mode Connection mode
  * @param [in] schema_search_dir - location where schema files are located
  * @param [in] data_search_dir - location where data files are located
  * @param [out] dm_ctx
@@ -318,7 +379,7 @@ int dm_get_module_and_lockw(dm_ctx_t *dm_ctx, const char *module_name, dm_schema
 /**
  * @brief Retrieves schema info using ::dm_get_module_and_lock. Lock is released. Function can be used to verify
  * that module existed during function execution. To use schema_info afterward, lock must be acquired
- * using ::dm_lock_schem_info or ::dm_lock_schema_info_write.
+ * using ::dm_lock_schema_info or ::dm_lock_schema_info_write.
  *
  * @note Function acquires and releases read lock for the schema info.
  *
@@ -347,11 +408,13 @@ int dm_list_schemas(dm_ctx_t *dm_ctx, dm_session_t *dm_session, sr_schema_t **sc
  * @param [in] module_revision if NULL is passed the latest revision is returned
  * @param [in] submodule_name To retrieve the content of module NULL can be passed,
  * corresponding revision is selected according to the module revision.
+ * @param [in] submodule_revision if submodule name is set, the exact submodule revision
+ * can be set and then module information does not have to be filled at all
  * @param [in] yang_format
  * @param [out] schema
  * @return Error code (SR_ERR_OK on success), SR_ERR_NOT_FOUND if the module/submodule or corresponding revision can not be found
  */
-int dm_get_schema(dm_ctx_t *dm_ctx, const char *module_name, const char *module_revision, const char *submodule_name, bool yang_format, char **schema);
+int dm_get_schema(dm_ctx_t *dm_ctx, const char *module_name, const char *module_revision, const char *submodule_name, const char *submodule_revision, bool yang_format, char **schema);
 
 /**
  * @brief Validates the data_trees in session.
@@ -371,9 +434,10 @@ int dm_validate_session_data_trees(dm_ctx_t *dm_ctx, dm_session_t *session, sr_e
  * call ::dm_get_data_info will load fresh data.
  * @param [in] dm_ctx
  * @param [in] session
+ * @param [in] module_name Optional module name.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_discard_changes(dm_ctx_t *dm_ctx, dm_session_t *session);
+int dm_discard_changes(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_name);
 
 /**
  * @brief Removes the modified flags from session copies of data trees.
@@ -414,18 +478,38 @@ int dm_update_session_data_trees(dm_ctx_t *dm_ctx, dm_session_t *session, sr_lis
 int dm_commit_prepare_context(dm_ctx_t *dm_ctx, dm_session_t *session, dm_commit_context_t **c_ctx);
 
 /**
+ * @brief Fill required modules for all modules loaded in the session for the current session datastore.
+ *
+ * @param [in] dm_ctx
+ * @param [in] session
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_commit_load_session_module_deps(dm_ctx_t *dm_ctx, dm_session_t *session);
+
+/**
  * @brief Loads the data tree which has been modified in the session to the commit context. If the session copy has
  * the same timestamp as the file system file it is copied otherwise, data tree is loaded from file and the changes
  * made in the session are applied.
  * @param [in] dm_ctx
  * @param [in] session
  * @param [in] c_ctx - commit context
+ * @param [in] force_copy_uptodate True if timestamp check of session info datatree and datastore file should be
+ * skipped and session info datatree should be always used (otherwise if the timestamp of session datatrees is older
+ * than of datastore file, the datatrees are overwritten with data loaded from the datastore file)
  * @param [out] errors
  * @param [out] err_cnt
  * @return Error code (SR_ERR_OK on success)
  */
 int dm_commit_load_modified_models(dm_ctx_t *dm_ctx, const dm_session_t *session, dm_commit_context_t *c_ctx,
-        sr_error_info_t **errors, size_t *err_cnt);
+        bool force_copy_uptodate, sr_error_info_t **errors, size_t *err_cnt);
+
+/**
+ * @brief Tries to acquire write locks on opened fds
+ * @param [in] session
+ * @param [in] commit_ctx
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_commit_writelock_fds(dm_session_t *session, dm_commit_context_t *commit_ctx);
 
 /**
  * @brief Writes the data trees from commit session stored in commit context into the files.
@@ -437,10 +521,26 @@ int dm_commit_load_modified_models(dm_ctx_t *dm_ctx, const dm_session_t *session
 int dm_commit_write_files(dm_session_t *session, dm_commit_context_t *c_ctx);
 
 /**
+ * @brief Execute NETCONF access control (NACM) to determine if the user is allowed
+ * to perform all the data modifications included in the commit.
+ *
+ * @param [in] nacm_ctx
+ * @param [in] session
+ * @param [in] c_ctx
+ * @param [in] copy_config
+ * @param [out] errors
+ * @param [out] err_cnt
+ * @return Error code (SR_ERR_OK on success, SR_ERR_UNAUTHORIZED in case of insufficient access rights)
+ */
+int dm_commit_netconf_access_control(nacm_ctx_t *nacm_ctx, dm_session_t *session, dm_commit_context_t *c_ctx,
+                                     bool copy_config, sr_error_info_t **errors, size_t *err_cnt);
+
+/**
  * @brief Notifies about the changes made within the running commit. It is
  * a post-commit notification - failure do not cause the commit to fail.
  * @param [in] dm_ctx
  * @param [in] session
+ * @param [in] ev type of the notification that should be generated
  * @param [in] c_ctx
  * @return Error code (SR_ERR_OK on success)
  */
@@ -453,26 +553,37 @@ int dm_commit_notify(dm_ctx_t *dm_ctx, dm_session_t *session, sr_notif_event_t e
 void dm_free_commit_context(void *commit_ctx);
 
 /**
- * @brief Saves commit context to be used for notifications. Releases acquired locks
- * and closes opened files.
- * @param [in] dm_ctx
- * @param [in] c_ctx
- */
-int dm_save_commit_context(dm_ctx_t *dm_ctx, dm_commit_context_t *c_ctx);
-
-/**
- * @brief Logs operation into session operation list. The operation list is used
+ * @brief Logs add operation into session operation list. The operation list is used
  * during the commit. Passed allocated arguments are freed in case of error also.
  * @param [in] session
- * @param [in] op
  * @param [in] xpath
  * @param [in] val - must be allocated, will be free with operation list
+ * @param [in] str_val
  * @param [in] opts
- * @param [in] pos - applicable only with move operation
- * @param [in] rel_item - option of move operation
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_add_operation(dm_session_t *session, dm_operation_t op, const char *xpath, sr_val_t *val, sr_edit_options_t opts, sr_move_position_t pos, const char *rel_item);
+int dm_add_set_operation(dm_session_t *session, const char *xpath, sr_val_t *val, char *str_val, sr_edit_options_t opts);
+
+/**
+ * @brief Logs del operation into session operation list. The operation list is used
+ * during the commit. Passed allocated arguments are freed in case of error also.
+ * @param [in] session
+ * @param [in] xpath
+ * @param [in] opts
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_add_del_operation(dm_session_t *session, const char *xpath, sr_edit_options_t opts);
+
+/**
+ * @brief Logs move operation into session operation list. The operation list is used
+ * during the commit. Passed allocated arguments are freed in case of error also.
+ * @param [in] session
+ * @param [in] xpath
+ * @param [in] pos
+ * @param [in] rel_item
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_add_move_operation(dm_session_t *session, const char *xpath, sr_move_position_t pos, const char *rel_item);
 
 /**
  * @brief Removes last logged operation in session
@@ -529,15 +640,6 @@ bool dm_has_error(dm_session_t *session);
 int dm_copy_errors(dm_session_t *session, sr_mem_ctx_t *sr_mem, char **error_msg, char **err_xpath);
 
 /**
- * @brief Looks up the schema info structure for the module specified by module name
- * @param [in] dm_ctx
- * @param [in] module_name
- * @param [out] schema_info - returned schema info is not locked
- * @return Error code (SR_ERR_OK on success)
-*/
-int dm_get_schema_info(dm_ctx_t *dm_ctx, const char *module_name, dm_schema_info_t **schema_info);
-
-/**
  *
  * @param [in] node
  * @return True if state of the node is DM_NODE_ENABLED or DM_NODE_ENABLED_WITH_CHILDREN, false otherwise.
@@ -560,6 +662,18 @@ bool dm_is_node_enabled_with_children(struct lys_node* node);
  * @return True if the node is enabled. It might be enabled directly or one any of his parent is in state DM_NODE_ENABLED_WITH_CHILDREN.
  */
 bool dm_is_enabled_check_recursively(struct lys_node *node);
+
+/**
+ * @brief Returns the hash of a schema node xpath identifier.
+ * If NULL is provided as the argument then 0 is returned.
+ */
+uint32_t dm_get_node_xpath_hash(struct lys_node *node);
+
+/**
+ * @brief Returns the depth of any potential instance of this schema node in the data tree.
+ * If NULL is provided as the argument then 0 is returned.
+ */
+uint16_t dm_get_node_data_depth(struct lys_node *node);
 
 /**
  * @brief Sets the state of the node.
@@ -647,22 +761,27 @@ int dm_feature_enable(dm_ctx_t *dm_ctx, const char *module_name, const char *fea
  * @note Function acquires and releases write lock for the schema info.
  *
  * @param [in] dm_ctx
+ * @param [in] session DM session.
  * @param [in] module_name
  * @param [in] revision
  * @param [in] file_name Name of the file that should be used for module installation
+ * @param [out] implicitly_installed List of automatically installed modules (import based dependencies).
  * @return Error code (SR_ERR_OK on success), SR_ERR_NOT_FOUND if module
  * is not loaded successfully
  */
-int dm_install_module(dm_ctx_t *dm_ctx, const char *module_name, const char *revision, const char *file_name);
+int dm_install_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_name,
+        const char *revision, const char *file_name, sr_list_t **implicitly_installed);
 
 /**
  * @brief Disables module
  * @param [in] dm_ctx
  * @param [in] module_name
  * @param [in] revision
+ * @param [out] implicitly_removed List of automatically removed modules (import based dependencies).
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_uninstall_module(dm_ctx_t *dm_ctx, const char *module_name, const char *revision);
+int dm_uninstall_module(dm_ctx_t *dm_ctx, const char *module_name, const char *revision,
+        sr_list_t **implicitly_removed);
 
 /**
  * @brief Checks whether the module contains any state data.
@@ -693,11 +812,11 @@ int dm_has_enabled_subtree(dm_ctx_t *ctx, const char *module_name, dm_schema_inf
  * @param [in] ctx DM context.
  * @param [in] session DM session.
  * @param [in] module_name Name of the module to be enabled.
- * @param [in] copy_from_startup - flag denoting whether data should be copied from startup to running.
+ * @param [in] subscription if the subscription is not NULL SR_EV_ENABLED notification is sent to the subscription.
  * @return Error code (SR_ERR_OK on success)
  */
 int dm_enable_module_running(dm_ctx_t *ctx, dm_session_t *session, const char *module_name,
-        bool copy_from_startup);
+        const np_subscription_t *subscription);
 
 /**
  * @brief Enables subtree in running datastore (including copying of the startup data into running).
@@ -705,11 +824,11 @@ int dm_enable_module_running(dm_ctx_t *ctx, dm_session_t *session, const char *m
  * @param [in] session DM session.
  * @param [in] module_name Name of the module where a subtree needs to be enabled.
  * @param [in] xpath XPath identifying the subtree to be enabled.
- * @param [in] copy_from_startup Load data from startup ds (if not already loaded).
+ * @param [in] subscription if the subscription is not NULL SR_EV_ENABLED notification is sent to the subscription.
  * @return Error code (SR_ERR_OK on success)
  */
 int dm_enable_module_subtree_running(dm_ctx_t *ctx, dm_session_t *session, const char *module_name, const char *xpath,
-        bool copy_from_startup);
+        const np_subscription_t *subscription);
 
 /**
  * @brief Disables module in running data store
@@ -719,7 +838,6 @@ int dm_enable_module_subtree_running(dm_ctx_t *ctx, dm_session_t *session, const
  * @param [in] ctx
  * @param [in] session
  * @param [in] module_name
- * @param [in] module (optional can be NULL)
  * @return Error code (SR_ERR_OK on success)
  */
 int dm_disable_module_running(dm_ctx_t *ctx, dm_session_t *session, const char *module_name);
@@ -731,9 +849,14 @@ int dm_disable_module_running(dm_ctx_t *ctx, dm_session_t *session, const char *
  * @param [in] module_name
  * @param [in] source
  * @param [in] destination
+ * @param [in] subscription if the subscription is not NULL SR_EV_ENABLED notification is sent to the subscription.
+ * @param [in] nacm_on
+ * @param [out] errors
+ * @param [out] err_cnt
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_copy_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_name, sr_datastore_t source, sr_datastore_t destination);
+int dm_copy_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_name, sr_datastore_t source, sr_datastore_t destination,
+        const np_subscription_t *subscription, bool nacm_on, sr_error_info_t **errors, size_t *err_cnt);
 
 /**
  * @brief Copies all enabled modules from one datastore to the another.
@@ -741,14 +864,18 @@ int dm_copy_module(dm_ctx_t *dm_ctx, dm_session_t *session, const char *module_n
  * @param [in] session
  * @param [in] src
  * @param [in] dst
+ * @param [in] nacm_on
+ * @param [out] errors
+ * @param [out] err_cnt
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_copy_all_models(dm_ctx_t *dm_ctx, dm_session_t *session, sr_datastore_t src, sr_datastore_t dst);
+int dm_copy_all_models(dm_ctx_t *dm_ctx, dm_session_t *session, sr_datastore_t src, sr_datastore_t dst, bool nacm_on,
+                       sr_error_info_t **errors, size_t *err_cnt);
 
 /**
  * @brief Validates content of a RPC request or reply.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] rpc_xpath XPath of the RPC.
  * @param [in] args Input/output arguments of the RPC.
  * @param [in] arg_cnt Number of input/output arguments provided.
@@ -760,13 +887,13 @@ int dm_copy_all_models(dm_ctx_t *dm_ctx, dm_session_t *session, sr_datastore_t s
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_rpc(dm_ctx_t *dm_ctx, dm_session_t *session, const char *rpc_xpath, sr_val_t *args, size_t arg_cnt, bool input,
-                    sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
+int dm_validate_rpc(rp_ctx_t *rp_ctx, rp_session_t *session, const char *rpc_xpath, sr_val_t *args, size_t arg_cnt, bool input,
+        sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
 
 /**
  * @brief Validates content of a RPC request or reply with arguments represented using sr_node_t.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] rpc_xpath XPath of the RPC.
  * @param [in] args Input/output arguments of the RPC.
  * @param [in] arg_cnt Number of input/output arguments provided.
@@ -778,13 +905,13 @@ int dm_validate_rpc(dm_ctx_t *dm_ctx, dm_session_t *session, const char *rpc_xpa
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_rpc_tree(dm_ctx_t *dm_ctx, dm_session_t *session, const char *rpc_xpath, sr_node_t *args, size_t arg_cnt, bool input,
-                         sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
+int dm_validate_rpc_tree(rp_ctx_t *rp_ctx, rp_session_t *session, const char *rpc_xpath, sr_node_t *args, size_t arg_cnt, bool input,
+        sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
 
 /**
  * @brief Validates content of an Action request or reply.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] action_xpath XPath of the Action.
  * @param [in] args Input/output arguments of the Action.
  * @param [in] arg_cnt Number of input/output arguments provided.
@@ -796,13 +923,13 @@ int dm_validate_rpc_tree(dm_ctx_t *dm_ctx, dm_session_t *session, const char *rp
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_action(dm_ctx_t *dm_ctx, dm_session_t *session, const char *action_xpath, sr_val_t *args, size_t arg_cnt, bool input,
-                    sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
+int dm_validate_action(rp_ctx_t *rp_ctx, rp_session_t *session, const char *action_xpath, sr_val_t *args, size_t arg_cnt, bool input,
+        sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
 
 /**
  * @brief Validates content of an Action request or reply with arguments represented using sr_node_t.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] action_xpath XPath of the Action.
  * @param [in] args Input/output arguments of the Action.
  * @param [in] arg_cnt Number of input/output arguments provided.
@@ -814,13 +941,13 @@ int dm_validate_action(dm_ctx_t *dm_ctx, dm_session_t *session, const char *acti
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_action_tree(dm_ctx_t *dm_ctx, dm_session_t *session, const char *action_xpath, sr_node_t *args, size_t arg_cnt, bool input,
+int dm_validate_action_tree(rp_ctx_t *rp_ctx, rp_session_t *session, const char *action_xpath, sr_node_t *args, size_t arg_cnt, bool input,
                          sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
 
 /**
  * @brief Validates content of an event notification request.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] notif_xpath XPath of the notification.
  * @param [in] values Event notification subtree nodes.
  * @param [in] value_cnt Number of items inside the values array.
@@ -829,15 +956,18 @@ int dm_validate_action_tree(dm_ctx_t *dm_ctx, dm_session_t *session, const char 
  * @param [out] with_def_cnt Number of items inside the *with_def* array.
  * @param [out] with_def_tree Event notification data including default values represented as sysrepo trees.
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
+ * @param [out] res_data_tree Resulting data tree, can be NULL in case that the caller does not need it.
+ * @param [out] res_ctx Context of \p res_data_tree in case a temporary one had to be created.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_event_notif(dm_ctx_t *dm_ctx, dm_session_t *session, const char *notif_xpath, sr_val_t *values, size_t value_cnt,
-                            sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
+int dm_validate_event_notif(rp_ctx_t *rp_ctx, rp_session_t *session, const char *notif_xpath, sr_val_t *values, size_t value_cnt,
+        sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt,
+        struct lyd_node **res_data_tree, struct ly_ctx **res_ctx);
 
 /**
  * @brief Validates content of an event notification request with data represented using sr_node_t.
- * @param [in] dm_ctx DM context.
- * @param [in] session DM session.
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
  * @param [in] notif_xpath XPath of the notification.
  * @param [in] trees Event notification subtree nodes.
  * @param [in] tree_cnt Number of items inside the values array.
@@ -846,14 +976,29 @@ int dm_validate_event_notif(dm_ctx_t *dm_ctx, dm_session_t *session, const char 
  * @param [out] with_def_cnt Number of items inside the *with_def* array.
  * @param [out] with_def_tree Event notification data including default values represented as sysrepo trees.
  * @param [out] with_def_tree_cnt Number of items inside the *with_def_tree* array.
+ * @param [out] res_data_tree Resulting data tree, can be NULL in case that the caller does not need it.
+ * @param [out] res_ctx Context of \p res_data_tree in case a temporary one had to be created.
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_validate_event_notif_tree(dm_ctx_t *dm_ctx, dm_session_t *session, const char *notif_xpath, sr_node_t *trees, size_t tree_cnt,
-                                 sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt);
+int dm_validate_event_notif_tree(rp_ctx_t *rp_ctx, rp_session_t *session, const char *notif_xpath, sr_node_t *trees, size_t tree_cnt,
+        sr_mem_ctx_t *sr_mem, sr_val_t **with_def, size_t *with_def_cnt, sr_node_t **with_def_tree, size_t *with_def_tree_cnt,
+        struct lyd_node **res_data_tree, struct ly_ctx **res_ctx);
+
+/**
+ * @brief Parses event notification with data in XML format (notification->type == NP_EV_NOTIF_DATA_XML) into desired
+ * sysrepo format (values or trees).
+ * @param [in] rp_ctx RP context.
+ * @param [in] session RP session.
+ * @param [in] sr_mem Sysrepo memory context to use for output values (can be NULL).
+ * @param [in,out] notification Notification to be processed.
+ * @param [in] api_variant requested API variant (values/trees).
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_parse_event_notif(rp_ctx_t *rp_ctx, rp_session_t *session, sr_mem_ctx_t *sr_mem,
+        np_ev_notification_t *notification, const sr_api_variant_t api_variant);
 
 /**
  * @brief Call lyd_new path uses ly_ctx from data_info->schema.
- * @param [in] dm_ctx
  * @param [in] data_info
  * @param [in] path
  * @param [in] value
@@ -911,18 +1056,18 @@ int dm_copy_if_not_loaded(dm_ctx_t *dm_ctx, dm_session_t *from_session, dm_sessi
  * will work on the selected datastore.
  * @param [in] session
  * @param [in] ds
- * @return Error code (SR_ERR_OK on success)
  */
-int dm_session_switch_ds(dm_session_t *session, sr_datastore_t ds);
+void dm_session_switch_ds(dm_session_t *session, sr_datastore_t ds);
 
 /**
  * @brief Moves session data trees and operations (for all datastores) from one session to another.
  * @param [in] dm_ctx
  * @param [in] from
  * @param [in] to
+ * @param [in] ds
  * @return Error code (SR_ERR_OK on success)
  */
-int dm_move_session_tree_and_ops_all_ds(dm_ctx_t *dm_ctx, dm_session_t *from, dm_session_t *to);
+int dm_move_session_tree_and_ops(dm_ctx_t *dm_ctx, dm_session_t *from, dm_session_t *to, sr_datastore_t ds);
 
 /**
  * @brief Moves data trees from one datastore to another in the session
@@ -1031,5 +1176,41 @@ int dm_lock_schema_info_write(dm_schema_info_t *schema_info);
  */
 int dm_get_nodes_by_schema(dm_session_t *session, const char *module_name, const struct lys_node *node, struct ly_set **res);
 
+/**
+ * @brief Returns and instance of NACM context
+ * @param [in] dm_ctx
+ * @param [out] nacm_ctx
+ *
+ * @return Error code (SR_ERR_OK on success)
+ *
+ */
+int dm_get_nacm_ctx(dm_ctx_t *dm_ctx, nacm_ctx_t **nacm_ctx);
+
+/**
+ * @brief Returns pointer to the session's data trees.
+ * @param [in] dm_ctx
+ * @param [in] session
+ * @param [out] session_models
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_get_session_datatrees(dm_ctx_t *dm_ctx, dm_session_t *session, sr_btree_t **session_models);
+
+/**
+ * @brief Function blocks until all commit ctxs are freed or timeout expires.
+ * @param [in] dm_ctx
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_wait_for_commit_context_to_be_empty(dm_ctx_t *dm_ctx);
+
+/**
+ * @brief Functions prints netconf-config-change-notification into string using tmp_ctx.
+ * This approach allows to save the notification to the file even using a context that don't have
+ * all schemas used by instance id loaded.
+ * @param [in] dm_ctx
+ * @param [in] notif
+ * @param [out] string
+ * @return Error code (SR_ERR_OK on success)
+ */
+int dm_netconf_config_change_to_string(dm_ctx_t *dm_ctx, struct lyd_node *notif, char **string);
 /**@} Data manager*/
 #endif /* SRC_DATA_MANAGER_H_ */

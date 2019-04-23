@@ -38,9 +38,10 @@
  * @param [in] session
  * @param [in] xpath
  * @param [in] options If the nodes can not be delete because of the option SR_ERR_DATA_MISSING or SR_ERR_DATA_EXISTS is returned
+ * @param [in] is_state Whether we are setting only state data (do not set modified flag).
  * @return Error code (SR_ERR_OK on success) SR_ERR_DATA_MISSING, SR_ERR_DATA_EXISTS, SR_ERR_UNKNOWN_MODEL, SR_ERR_BAD_ELEMENT
  */
-int rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const sr_edit_flag_t options);
+int rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const sr_edit_flag_t options, bool is_state);
 
 /**
  * @brief Function validates the xpath and then creates presence container, list instance, leaf, leaf-list item. If the xpath identifies leaf-list value
@@ -51,9 +52,11 @@ int rp_dt_delete_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath
  * @param [in] xpath
  * @param [in] options If the node can not be created because of the option SR_ERR_DATA_EXISTS or SR_ERR_DATA_MISSING is returned
  * @param [in] value the value to be set (xpath inside the structure is ignored), in case of presence container or list instance is ignored can be NULL
+ * @param [in] str_val alternatinve way of passing the value, if value is NULL string representation is taken into account
+ * @param [in] is_state Whether we are setting only state data (do not set modified flag).
  * @return Error code (SR_ERR_OK on success) SR_ERR_DATA_MISSING, SR_ERR_DATA_EXISTS, SR_ERR_UNKNOWN_MODEL, SR_ERR_BAD_ELEMENT
  */
-int rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const sr_edit_flag_t options, const sr_val_t *value);
+int rp_dt_set_item(dm_ctx_t *dm_ctx, dm_session_t *session, const char *xpath, const sr_edit_flag_t options, const sr_val_t *value, const char *str_val, bool is_state);
 
 /**
  * @brief Move the list instance into selected direction. If the list instance doesn't exists or the list is not user-ordered SR_ERR_INVAL_ARG is returned.
@@ -83,10 +86,11 @@ int rp_dt_move_list_wrapper(rp_ctx_t *rp_ctx, rp_session_t *session, const char 
  * @param [in] session
  * @param [in] xpath
  * @param [in] val
+ * @param [in] str_val
  * @param [in] opt
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_set_item_wrapper(rp_ctx_t *rp_ctx, rp_session_t *session, const char *xpath, sr_val_t *val, sr_edit_options_t opt);
+int rp_dt_set_item_wrapper(rp_ctx_t *rp_ctx, rp_session_t *session, const char *xpath, sr_val_t *val, char *str_val, sr_edit_options_t opt);
 
 /**
  * @brief Wraps ::rp_dt_delete_item call. In in case of success logs the operation to the session's operation list.
@@ -115,11 +119,13 @@ int rp_dt_delete_item_wrapper(rp_ctx_t *rp_ctx, rp_session_t *session, const cha
  * @param [in] rp_ctx
  * @param [in] session
  * @param [in] c_ctx - if argument is not NULL it is used as context to continue commit process
+ * @param [in] copy_config - whether to perform copy-config read checks and consider session trees up-to-date
  * @param [out] errors
  * @param [out] err_cnt
  * @return Error code (SR_ERR_OK on success), SR_ERR_COMMIT_FAILED, SR_ERR_VALIDATION_FAILED, SR_ERR_IO
  */
-int rp_dt_commit(rp_ctx_t *rp_ctx, rp_session_t *session, dm_commit_context_t *c_ctx, sr_error_info_t **errors, size_t *err_cnt);
+int rp_dt_commit(rp_ctx_t *rp_ctx, rp_session_t *session, dm_commit_context_t **c_ctx, bool copy_config,
+        sr_error_info_t **errors, size_t *err_cnt);
 
 /**
  * @brief Tries to merge the current state of session with the file system change.
@@ -141,9 +147,11 @@ int rp_dt_refresh_session(rp_ctx_t *rp_ctx, rp_session_t *session, sr_error_info
  * @param [in] module_name
  * @param [in] src
  * @param [in] dst
+ * @param [out] errors
+ * @param [out] err_cnt
  * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_copy_config(rp_ctx_t *rp_ctx, rp_session_t *session, const char *module_name, sr_datastore_t src, sr_datastore_t dst);
+int rp_dt_copy_config(rp_ctx_t *rp_ctx, rp_session_t *session, const char *module_name, sr_datastore_t src, sr_datastore_t dst, sr_error_info_t **errors, size_t *err_cnt);
 
 /**
  * @brief Changes the datastore of the session. Subsequent call will operate on the
@@ -151,9 +159,8 @@ int rp_dt_copy_config(rp_ctx_t *rp_ctx, rp_session_t *session, const char *modul
  * @param [in] rp_ctx
  * @param [in] session
  * @param [in] ds
- * @return Error code (SR_ERR_OK on success)
  */
-int rp_dt_switch_datastore(rp_ctx_t *rp_ctx, rp_session_t *session, sr_datastore_t ds);
+void rp_dt_switch_datastore(rp_ctx_t *rp_ctx, rp_session_t *session, sr_datastore_t ds);
 
 /**
  * @brief Locks a model or whole datastore. Lock can not be acquired if the session

@@ -22,6 +22,8 @@
 #include "test_module_helper.h"
 #include "sr_common.h"
 #include "test_data.h"
+#include <stdio.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -35,7 +37,7 @@ createDataTreeTestModule()
     struct lyd_node *n = NULL;
     struct lyd_node *r = NULL;
 
-    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     const struct lys_module *module = ly_ctx_load_module(ctx, "test-module", NULL);
@@ -91,6 +93,15 @@ createDataTreeTestModule()
     node = lyd_new_leaf(r, module, "id_ref", XP_TEST_MODULE_IDREF_VALUE);
     assert_non_null(node);
 
+    node = lyd_new_anydata(r, module, "xml-data", XP_TEST_MODULE_ANYXML_VALUE, LYD_ANYDATA_CONSTSTRING);
+    assert_non_null(node);
+
+    node = lyd_new_anydata(r, module, "any-data", XP_TEST_MODULE_ANYDATA_VALUE, LYD_ANYDATA_CONSTSTRING);
+    assert_non_null(node);
+
+    node = lyd_new_leaf(r, module, "instance_id", XP_TEST_MODULE_INSTANCE_ID_VALUE);
+    assert_non_null(node);
+
     /* leaf -list*/
     n = lyd_new_leaf(r, module, "numbers", "1");
     assert_non_null(n);
@@ -132,6 +143,23 @@ createDataTreeTestModule()
 
     n = lyd_new_leaf(node, module, "union", "infinity");
     assert_non_null(n);
+
+    /* user-ordered leaf-list items */
+    node = lyd_new_leaf(NULL, module, "ordered-numbers", "45");
+    assert_non_null(node);
+    assert_int_equal(0, lyd_insert_after(r, node));
+
+    node = lyd_new_leaf(NULL, module, "ordered-numbers", "12");
+    assert_non_null(node);
+    assert_int_equal(0, lyd_insert_after(r, node));
+
+    node = lyd_new_leaf(NULL, module, "ordered-numbers", "57");
+    assert_non_null(node);
+    assert_int_equal(0, lyd_insert_after(r, node));
+
+    node = lyd_new_leaf(NULL, module, "ordered-numbers", "0");
+    assert_non_null(node);
+    assert_int_equal(0, lyd_insert_after(r, node));
 
     /* list + list of leafrefs */
     node = lyd_new(NULL, module, "university");
@@ -250,7 +278,7 @@ createDataTreeTestModule()
 
     /* validate & save */
     assert_int_equal(0, lyd_validate(&r, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_MODULE_DATA_FILE_NAME, r));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_MODULE_DATA_FILE_NAME, r, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(r);
 
@@ -264,7 +292,7 @@ createDataTreeExampleModule()
     struct ly_ctx *ctx = NULL;
     struct lyd_node *root = NULL;
 
-    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     const struct lys_module *module = ly_ctx_load_module(ctx, "example-module", NULL);
@@ -274,7 +302,7 @@ createDataTreeExampleModule()
 
     root = lyd_new_path(NULL, ctx, XPATH, "Leaf value", 0, 0);
     assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(EXAMPLE_MODULE_DATA_FILE_NAME, root));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(EXAMPLE_MODULE_DATA_FILE_NAME, root, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(root);
     ly_ctx_destroy(ctx, NULL);
@@ -286,7 +314,7 @@ createDataTreeLargeExampleModule(int list_count)
     struct ly_ctx *ctx = NULL;
     struct lyd_node *root = NULL, *node = NULL;
 
-    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     const struct lys_module *module = ly_ctx_load_module(ctx, "example-module", NULL);
@@ -307,7 +335,7 @@ createDataTreeLargeExampleModule(int list_count)
     lyd_new_path(root, ctx, "/example-module:container/list[key1='key1'][key2='key2']/leaf", "Leaf value", 0, 0);
 
     assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(EXAMPLE_MODULE_DATA_FILE_NAME, root));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(EXAMPLE_MODULE_DATA_FILE_NAME, root, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(root);
     ly_ctx_destroy(ctx, NULL);
@@ -317,18 +345,18 @@ void
 createDataTreeLargeIETFinterfacesModule(size_t if_count)
 {
 
-    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     struct lyd_node *root = NULL;
 
     #define MAX_IF_LEN 150
-    const char *template_prefix_len = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/address[ip='192.168.%d.%d']/prefix-length";
+    const char *template_prefix_len = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/ietf-ip:address[ietf-ip:ip='192.168.%d.%d']/ietf-ip:prefix-length";
     const char *template_type = "/ietf-interfaces:interfaces/interface[name='eth%d']/type";
     const char *template_desc = "/ietf-interfaces:interfaces/interface[name='eth%d']/description";
     const char *template_enabled = "/ietf-interfaces:interfaces/interface[name='eth%d']/enabled";
-    const char *template_ipv4_enabled = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/enabled";
-    const char *template_ipv4_mtu = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/mtu";
+    const char *template_ipv4_enabled = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/ietf-ip:enabled";
+    const char *template_ipv4_mtu = "/ietf-interfaces:interfaces/interface[name='eth%d']/ietf-ip:ipv4/ietf-ip:mtu";
     char xpath[MAX_IF_LEN] = {0,};
 
     const struct lys_module *module_interfaces = ly_ctx_load_module(ctx, "ietf-interfaces", NULL);
@@ -346,7 +374,7 @@ createDataTreeLargeIETFinterfacesModule(size_t if_count)
             root = node;
         }
         snprintf(xpath, MAX_IF_LEN, template_type, i);
-        lyd_new_path(root, ctx, xpath, "ethernetCsmacd", 0, 0);
+        lyd_new_path(root, ctx, xpath, "iana-if-type:ethernetCsmacd", 0, 0);
 
         snprintf(xpath, MAX_IF_LEN, template_desc, i);
         lyd_new_path(root, ctx, xpath, "ethernet interface", 0, 0);
@@ -364,7 +392,7 @@ createDataTreeLargeIETFinterfacesModule(size_t if_count)
 
 
     assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(root);
     ly_ctx_destroy(ctx, NULL);
@@ -373,7 +401,7 @@ createDataTreeLargeIETFinterfacesModule(size_t if_count)
 void
 createDataTreeIETFinterfacesModule(){
 
-    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     struct lyd_node *root = NULL;
@@ -388,7 +416,7 @@ createDataTreeIETFinterfacesModule(){
     node = lyd_new(root, module_interfaces, "interface");
     lyd_new_leaf(node, module_interfaces, "name", "eth0");
     lyd_new_leaf(node, module_interfaces, "description", "Ethernet 0");
-    lyd_new_leaf(node, module_interfaces, "type", "ethernetCsmacd");
+    lyd_new_leaf(node, module_interfaces, "type", "iana-if-type:ethernetCsmacd");
     lyd_new_leaf(node, module_interfaces, "enabled", "true");
     node = lyd_new(node, module_ip, "ipv4");
     lyd_new_leaf(node, module_ip, "enabled", "true");
@@ -400,7 +428,7 @@ createDataTreeIETFinterfacesModule(){
     node = lyd_new(root, module_interfaces, "interface");
     lyd_new_leaf(node, module_interfaces, "name", "eth1");
     lyd_new_leaf(node, module_interfaces, "description", "Ethernet 1");
-    lyd_new_leaf(node, module_interfaces, "type", "ethernetCsmacd");
+    lyd_new_leaf(node, module_interfaces, "type", "iana-if-type:ethernetCsmacd");
     lyd_new_leaf(node, module_interfaces, "enabled", "true");
     node = lyd_new(node, module_ip, "ipv4");
     lyd_new_leaf(node, module_ip, "enabled", "true");
@@ -412,11 +440,51 @@ createDataTreeIETFinterfacesModule(){
     node = lyd_new(root, module_interfaces, "interface");
     lyd_new_leaf(node, module_interfaces, "name", "gigaeth0");
     lyd_new_leaf(node, module_interfaces, "description", "GigabitEthernet 0");
-    lyd_new_leaf(node, module_interfaces, "type", "ethernetCsmacd");
+    lyd_new_leaf(node, module_interfaces, "type", "iana-if-type:ethernetCsmacd");
     lyd_new_leaf(node, module_interfaces, "enabled", "false");
 
     assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces"SR_STARTUP_FILE_EXT, root, SR_FILE_FORMAT_LY));
+
+    lyd_free_withsiblings(root);
+    ly_ctx_destroy(ctx, NULL);
+}
+
+void
+createDataTreeIETFinterfacesModuleMerge(){
+
+    struct ly_ctx *ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
+    assert_non_null(ctx);
+
+    struct lyd_node *root = NULL;
+
+    const struct lys_module *module_interfaces = ly_ctx_load_module(ctx, "ietf-interfaces", NULL);
+    const struct lys_module *module_ip = ly_ctx_load_module(ctx, "ietf-ip", NULL);
+    const struct lys_module *module = ly_ctx_load_module(ctx, "iana-if-type", "2014-05-08");
+    assert_non_null(module);
+    struct lyd_node *node = NULL;
+
+    root = lyd_new(NULL, module_interfaces, "interfaces");
+    node = lyd_new(root, module_interfaces, "interface");
+    lyd_new_leaf(node, module_interfaces, "name", "eth0");
+    lyd_new_leaf(node, module_interfaces, "description", "Ethernet 0 for Merging");
+    lyd_new_leaf(node, module_interfaces, "type", "iana-if-type:ethernetCsmacd");
+    lyd_new_leaf(node, module_interfaces, "enabled", "false");
+    node = lyd_new(node, module_ip, "ipv4");
+    lyd_new_leaf(node, module_ip, "enabled", "false");
+    lyd_new_leaf(node, module_ip, "mtu", "1600");
+
+    node = lyd_new(root, module_interfaces, "interface");
+    lyd_new_leaf(node, module_interfaces, "name", "vdsl0");
+    lyd_new_leaf(node, module_interfaces, "description", "Vdsl 0 for Merging");
+    lyd_new_leaf(node, module_interfaces, "type", "iana-if-type:vdsl");
+    lyd_new_leaf(node, module_interfaces, "enabled", "true");
+    node = lyd_new(node, module_ip, "ipv4");
+    lyd_new_leaf(node, module_ip, "enabled", "true");
+    lyd_new_leaf(node, module_ip, "mtu", "1500");
+
+    assert_int_equal(0, lyd_validate(&root, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(TEST_DATA_SEARCH_DIR"ietf-interfaces.merge." SR_FILE_FORMAT_EXT, root, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(root);
     ly_ctx_destroy(ctx, NULL);
@@ -428,7 +496,7 @@ createDataTreeReferencedModule(int8_t magic_number)
     struct ly_ctx *ctx = NULL;
     struct lyd_node *r1 = NULL, *r2 = NULL, *leaf = NULL;
 
-    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     const struct lys_module *module = ly_ctx_load_module(ctx, "referenced-data", NULL);
@@ -446,7 +514,7 @@ createDataTreeReferencedModule(int8_t magic_number)
 
     /* validate & save */
     assert_int_equal(0, lyd_validate(&r1, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(REFERENCED_MODULE_DATA_FILE_NAME, r1));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(REFERENCED_MODULE_DATA_FILE_NAME, r1, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(r1);
 
@@ -459,7 +527,7 @@ createDataTreeStateModule()
     struct ly_ctx *ctx = NULL;
     struct lyd_node *r1 = NULL, *r2 = NULL, *leaf = NULL;
 
-    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR);
+    ctx = ly_ctx_new(TEST_SCHEMA_SEARCH_DIR, 0);
     assert_non_null(ctx);
 
     const struct lys_module *module = ly_ctx_load_module(ctx, "state-module@2016-07-01", NULL);
@@ -480,10 +548,18 @@ createDataTreeStateModule()
 
     /* validate & save */
     assert_int_equal(0, lyd_validate(&r1, LYD_OPT_STRICT | LYD_OPT_CONFIG, NULL));
-    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(STATE_MODULE_DATA_FILE_NAME, r1));
+    assert_int_equal(SR_ERR_OK, sr_save_data_tree_file(STATE_MODULE_DATA_FILE_NAME, r1, SR_FILE_FORMAT_LY));
 
     lyd_free_withsiblings(r1);
 
     ly_ctx_destroy(ctx, NULL);
+}
 
+void
+skip_if_daemon_running()
+{
+    if (-1 != access(SR_DAEMON_PID_FILE, F_OK)) {
+        printf("Skipping the testcase since sysrepod is running.");
+        skip();
+    }
 }

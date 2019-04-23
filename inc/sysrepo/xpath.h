@@ -1,5 +1,5 @@
 /**
- * @file xpath_utils.h
+ * @file xpath.h
  * @author Rastislav Szabo <raszabo@cisco.com>, Lukas Macko <lmacko@cisco.com>
  * @brief Sysrepo helpers for node's address manipulation.
  *
@@ -22,20 +22,23 @@
 #ifndef SYSREPO_XPATH_H_
 #define SYSREPO_XPATH_H_
 
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @defgroup xpath_utils XPath Processing Utilities
  * @{
  *
  *  @brief Set of helpers working on a subset of xpath expressions used of node identification
  *  Functions modify inputs arguments by placing termination zero at appropriate places to save up
- *  string duplication. The state of processing is stored in ::sr_address_state_t opaque for user.
+ *  string duplication. The state of processing is stored in ::sr_xpath_ctx_t opaque for user.
  *  It allows to continue in processing where the processing stopped or recover processed input.
  *
  *  Similarly to strtok function in all subsequent calls that is supposed to work with the same
  *  input xpath must be NULL.
- *
- *  @note Functions expects that key values do not contain
- *  characters like '[=/. If any yes it can lead to undefined behavior.
  */
 
 /**
@@ -59,7 +62,7 @@ typedef struct sr_xpath_ctx_s {
  *
  * @note It writes terminating zero at the and of the node name.
  *
- * @note Skips the namespace if it is present to get node name qualified by namespace use ::sr_get_next_node_with_ns
+ * @note Skips the namespace if it is present to get node name qualified by namespace use ::sr_xpath_next_node_with_ns
  *
  * @param [in] xpath - xpath to be processed, can be NULL
  * @param [in] state
@@ -68,7 +71,15 @@ typedef struct sr_xpath_ctx_s {
 char *sr_xpath_next_node(char *xpath, sr_xpath_ctx_t *state);
 
 /**
- * @brief Same as ::sr_get_next_node with the difference that namespace is included in result if present in xpath
+ * @brief Returns pointer to the last node.
+ * @param [in] xpath
+ * @param [in] state
+ * @return Pointer to the last node
+ */
+char *sr_xpath_last_node(char *xpath, sr_xpath_ctx_t *state);
+
+/**
+ * @brief Same as ::sr_xpath_next_node with the difference that namespace is included in result if present in xpath
  *
  * @param [in] xpath - xpath to be processed, can be NULL if the user wants to continue in processing of previous input
  * @param [in] state
@@ -147,7 +158,6 @@ char *sr_xpath_node_idx_rel(char *xpath, size_t index, sr_xpath_ctx_t *state);
  */
 char *sr_xpath_node_key_value(char *xpath, const char *key, sr_xpath_ctx_t *state);
 
-
 /**
  * @brief Looks up the value for the key at the current level in xpath specified by index.
  * First key has index zero.
@@ -182,28 +192,41 @@ char *sr_xpath_key_value(char *xpath, const char *node_name, const char *key_nam
 char *sr_xpath_key_value_idx(char *xpath, size_t node_index, size_t key_index, sr_xpath_ctx_t *state);
 
 /**
- * @brief Returns pointer to the last node.
- * @param [in] xpath
- * @param [in] state
- * @return Pointer to the last node
- */
-char *sr_xpath_last_node(char *xpath, sr_xpath_ctx_t *state);
-
-/**
- * @brief Pointer to the string after last slash.
+ * @brief Returns pointer to the string after the last slash in xpath (node name).
+ *
+ * @note The returned string can also contain namespace and/or key values
+ * if they were specified for the last node in xpath.
+ *
  * @param [in] xpath
  * @return Result, NULL in case of the slash was not found
  */
 char *sr_xpath_node_name(const char *xpath);
 
 /**
- * @brief Function puts back the character that was replaced by termination zero.
+ * @brief Compares string after the last slash in xpath (node name) with provided string.
+ *
+ * @note The returned string can also contain namespace and/or key values
+ * if they were specified for the last node in xpath.
+ *
+ * @param [in] xpath
+ * @param [in] node_str String to test for equality.
+ * @return true in case that the Node names are equal, false otherwise
+ */
+bool sr_xpath_node_name_eq(const char *xpath, const char *node_str);
+
+/**
+ * @brief Recovers the xpath string to the original state (puts back the character
+ * that was replaced by termination zero).
  *
  * @param [in] state
  */
 void sr_xpath_recover(sr_xpath_ctx_t *state);
 
 /**@} xpath_utils */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SYSREPO_XPATH_H_ */
 

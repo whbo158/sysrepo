@@ -19,87 +19,95 @@
  * limitations under the License.
  */
 
-#include "Internal.h"
 #include <iostream>
+
+#include "Sysrepo.hpp"
+#include "Internal.hpp"
 
 extern "C" {
 #include "sysrepo.h"
 #include "sysrepo/trees.h"
 }
 
-using namespace std;
+namespace sysrepo {
 
-void Counter::init_all() {
-    _val = NULL;
-    _vals = NULL;
-    _cnt = 0;
-    p_vals = NULL;
-    p_cnt = NULL;
-
-    _tree = NULL;
-    _trees = NULL;
-    p_trees = NULL;
+Deleter::Deleter(sr_val_t *val) {
+    v._val = val;
+    _t = Free_Type::VAL;
 }
-Counter::Counter(sr_val_t *val) {
-    Counter::init_all();
-    _val = val;
-    _t = VAL;
+Deleter::Deleter(sr_val_t *vals, size_t cnt) {
+    v._val = vals;
+    c._cnt = cnt;
+    _t = Free_Type::VALS;
 }
-Counter::Counter(sr_val_t *vals, size_t cnt) {
-    Counter::init_all();
-    _vals = vals;
-    _cnt = cnt;
-    _t = VALS;
+Deleter::Deleter(sr_val_t **vals, size_t *cnt) {
+    v.p_vals = vals;
+    c.p_cnt = cnt;
+    _t = Free_Type::VALS_POINTER;
 }
-Counter::Counter(sr_val_t **vals, size_t *cnt) {
-    Counter::init_all();
-    p_vals = vals;
-    p_cnt = cnt;
-    _t = VALS_POINTER;
+Deleter::Deleter(sr_node_t *tree) {
+    v._tree = tree;
+    _t = Free_Type::TREE;
 }
-Counter::Counter(sr_node_t *tree) {
-    Counter::init_all();
-    _tree = tree;
-    _t = TREE;
+Deleter::Deleter(sr_node_t *trees, size_t cnt) {
+    v._tree = trees;
+    c._cnt = cnt;
+    _t = Free_Type::TREES;
 }
-Counter::Counter(sr_node_t *trees, size_t cnt) {
-    Counter::init_all();
-    _trees = trees;
-    _cnt = cnt;
-    _t = TREES;
+Deleter::Deleter(sr_node_t **trees, size_t *cnt) {
+    v.p_trees = trees;
+    c.p_cnt = cnt;
+    _t = Free_Type::TREES_POINTER;
 }
-Counter::Counter(sr_node_t **trees, size_t *cnt) {
-    Counter::init_all();
-    p_trees = trees;
-    p_cnt = cnt;
-    _t = TREES_POINTER;
+Deleter::Deleter(sr_schema_t *sch, size_t cnt) {
+    v._sch = sch;
+    c._cnt = cnt;
+    _t = Free_Type::SCHEMAS;
 }
-Counter::~Counter() {
+Deleter::Deleter(sr_session_ctx_t *sess) {
+    v._sess = sess;
+    _t = Free_Type::SESSION;
+}
+Deleter::~Deleter() {
     switch(_t) {
-    case VAL:
-        if (_val) sr_free_val(_val);
-	_val = NULL;
+    case Free_Type::VAL:
+        if (v._val) sr_free_val(v._val);
+    v._val = nullptr;
     break;
-    case VALS:
-        if (_vals) sr_free_values(_vals, _cnt);
-	_vals = NULL;
+    case Free_Type::VALS:
+        if (v._val) sr_free_values(v._val, c._cnt);
+    v._val = nullptr;
     break;
-    case VALS_POINTER:
-        if (*p_vals) sr_free_values(*p_vals, *p_cnt);
-	*p_vals = NULL;
+    case Free_Type::VALS_POINTER:
+        if (*v.p_vals) sr_free_values(*v.p_vals, *c.p_cnt);
+    *v.p_vals = nullptr;
     break;
-    case TREE:
-        if (_tree) sr_free_tree(_tree);
-	_tree = NULL;
+    case Free_Type::TREE:
+        if (v._tree) sr_free_tree(v._tree);
+    v._tree = nullptr;
     break;
-    case TREES:
-        if (_trees) sr_free_trees(_trees, _cnt);
-	_trees = NULL;
+    case Free_Type::TREES:
+        if (v._tree) sr_free_trees(v._tree, c._cnt);
+    v._tree = nullptr;
     break;
-    case TREES_POINTER:
-        if (*p_trees) sr_free_trees(*p_trees, *p_cnt);
-	*p_trees = NULL;
+    case Free_Type::TREES_POINTER:
+        if (*v.p_trees) sr_free_trees(*v.p_trees, *c.p_cnt);
+    *v.p_trees = nullptr;
+    break;
+    case Free_Type::SCHEMAS:
+        if (v._sch) sr_free_schemas(v._sch, c._cnt);
+    v._sch = nullptr;
+    break;
+    case Free_Type::SESSION:
+        if (!v._sess) break;
+        int ret = sr_session_stop(v._sess);
+        if (ret != SR_ERR_OK) {
+            //this exception can't be catched
+            //throw_exception(ret);
+        }
+    v._sess = nullptr;
     break;
     }
-    return;
+}
+
 }

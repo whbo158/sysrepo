@@ -25,18 +25,10 @@
 #include <pthread.h>
 #include "sr_common.h"
 
+/**
+ * @brief Definition in connection_manager.c
+ */
 typedef struct cm_ctx_s cm_ctx_t;
-
-/**
- * @brief Timeout (in seconds) for waiting for a response from server by a standard request.
- */
-#define CL_REQUEST_TIMEOUT 3
-
-/**
- * @brief Timeout (in seconds) for waiting for a response from server by each request
- * that may take longer time such as commit or copy-config.
- */
-#define CL_REQUEST_LONG_TIMEOUT 60
 
 /**
  * @brief Connection context used to identify a connection to sysrepo datastore.
@@ -53,7 +45,6 @@ typedef struct sr_conn_ctx_s {
     struct sr_session_list_s *session_list;  /**< Linked-list of associated sessions. */
     bool library_mode;                       /**< Determine if we are connected to sysrepo daemon
                                                   or our own sysrepo engine (library mode). */
-    cm_ctx_t *local_cm;                      /**< Local Connection Manager in case of library mode. */
 } sr_conn_ctx_t;
 
 /**
@@ -121,6 +112,15 @@ void cl_session_cleanup(sr_session_ctx_t *session);
  * @return Error code (SR_ERR_OK on success).
  */
 int cl_socket_connect(sr_conn_ctx_t *conn_ctx, const char *socket_path);
+
+/**
+ * @brief Verifies compatibility of the server (sysrepod) version.
+ *
+ * @param[in] connection Connection context acquired by ::cl_connection_create call.
+ *
+ * @return Error code (SR_ERR_OK on success).
+ */
+int cl_version_verify(sr_conn_ctx_t *connection);
 
 /**
  * @brief Processes (sends) the request over the connection and receive the response.

@@ -31,6 +31,9 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <ev.h>
+#ifndef HAVE_MKSTEMPS
+#include <fcntl.h>
+#endif
 
 #include "cl_subscription_manager.h"
 #include "sr_common.h"
@@ -93,6 +96,8 @@ typedef struct cl_sm_ctx_s {
     ev_async stop_watcher;
     /** Watcher for changes in server context list. */
     ev_async server_ctx_watcher;
+    /** Blocking synchronization of processing of all pending events */
+    sr_fd_sm_terminated_cb local_watcher_terminate_cb;
 } cl_sm_ctx_t;
 
 /**
@@ -203,6 +208,7 @@ cl_sm_subscription_cleanup_internal(void *subscription_p)
     if (NULL != subscription_p) {
         subscription = (cl_sm_subscription_ctx_t *)subscription_p;
         free((void*)subscription->module_name);
+        free((void*)subscription->xpath);
         free(subscription);
     }
 }
@@ -284,7 +290,11 @@ cl_sm_connection_cleanup(void *connection_p)
 
         /* stop monitoring client file descriptor */
         if (conn->sm_ctx->local_fd_watcher) {
-            cl_sm_fd_changeset_add(conn->sm_ctx, conn->fd, (SR_FD_INPUT_READY | SR_FD_OUTPUT_READY), SR_FD_STOP_WATCHING);
+            if (conn->sm_ctx->local_watcher_terminate_cb) {
+                /* do nothing, we have already asked for the event loop to be stopped */
+            } else {
+                cl_sm_fd_changeset_add(conn->sm_ctx, conn->fd, (SR_FD_INPUT_READY | SR_FD_OUTPUT_READY), SR_FD_STOP_WATCHING);
+            }
         } else {
             if (NULL != conn->read_watcher.data) {
                 ev_io_stop(conn->sm_ctx->event_loop, &conn->read_watcher);
@@ -388,6 +398,10 @@ cl_sm_conn_out_buff_flush(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn)
     buff_size = buff->pos;
     buff_pos = conn->out_buff.start;
 
+    if (buff_size - buff_pos == 0) {
+        return rc;
+    }
+
     SR_LOG_DBG("Sending %zu bytes of data.", (buff_size - buff_pos));
 
     do {
@@ -467,6 +481,9 @@ cl_sm_get_data_session(cl_sm_ctx_t *sm_ctx, cl_sm_subscription_ctx_t *subscripti
         }
         if (SR_ERR_OK == rc) {
             rc = cl_socket_connect(connection, connection->dst_address);
+        }
+        if (SR_ERR_OK == rc) {
+            rc = cl_version_verify(connection);
         }
         if (SR_ERR_OK == rc) {
             rc = sr_btree_insert(sm_ctx->data_connection_btree, connection);
@@ -629,6 +646,7 @@ cl_sm_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
     sr_session_ctx_t *data_session = NULL;
     Sr__Msg *ack_msg = NULL;
     sr_mem_ctx_t *sr_mem = NULL;
+    const char *errmsg = NULL;
     int rc = SR_ERR_OK, rc_tmp = SR_ERR_OK;
 
     CHECK_NULL_ARG3(sm_ctx, msg, msg->notification);
@@ -663,8 +681,9 @@ cl_sm_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
                 (msg->notification->has_commit_id ? msg->notification->commit_id : 0),
                 &data_session);
         if (SR_ERR_OK != rc) {
-            pthread_mutex_unlock(&sm_ctx->subscriptions_lock);
-            return rc;
+            errmsg = "Unable to create data session for notification callbacks.";
+            rc = SR_ERR_DISCONNECT;
+            goto ack;
         }
         cl_session_clear_errors(data_session);
     }
@@ -675,7 +694,7 @@ cl_sm_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
             subscription->callback.module_install_cb(
                     msg->notification->module_install_notif->module_name,
                     msg->notification->module_install_notif->revision,
-                    msg->notification->module_install_notif->installed,
+                    sr_module_state_gpb_to_sr(msg->notification->module_install_notif->state),
                     subscription->private_ctx);
             break;
         case SR__SUBSCRIPTION_TYPE__FEATURE_ENABLE_SUBS:
@@ -718,6 +737,7 @@ cl_sm_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
             rc = SR_ERR_INVAL_ARG;
     }
 
+ack:
     /* send notification ACK */
     if ((SR__SUBSCRIPTION_TYPE__MODULE_CHANGE_SUBS == msg->notification->type) ||
             (SR__SUBSCRIPTION_TYPE__SUBTREE_CHANGE_SUBS == msg->notification->type)) {
@@ -727,12 +747,21 @@ cl_sm_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
         }
         if (SR_ERR_OK == rc_tmp) {
             ack_msg->notification_ack->result = rc;
-            if (SR_ERR_OK != rc && data_session->error_cnt > 0) {
-                /* error info was provided */
-                rc = sr_gpb_fill_error(data_session->error_info->message, data_session->error_info->xpath, sr_mem,
-                        &ack_msg->notification_ack->error);
-                if (SR_ERR_OK != rc) {
+            if (SR_ERR_OK != rc) {
+                if (subscription->opts & SR_SUBSCR_NO_ABORT_FOR_REFUSED_CFG) {
+                    ack_msg->notification_ack->do_not_send_abort = true;
+                }
+                if (NULL != data_session && data_session->error_cnt > 0) {
+                    /* error info was provided */
+                    rc_tmp = sr_gpb_fill_error(data_session->error_info->message, data_session->error_info->xpath, sr_mem,
+                            &ack_msg->notification_ack->error);
+                } else if (NULL != errmsg) {
+                    /* internal error message */
+                    rc_tmp = sr_gpb_fill_error(errmsg, NULL, sr_mem, &ack_msg->notification_ack->error);
+                }
+                if (SR_ERR_OK != rc_tmp) {
                     SR_LOG_WRN_MSG("Unable to fill errors into notification ACK message.");
+                    rc_tmp = SR_ERR_OK;
                 }
             }
         }
@@ -788,6 +817,8 @@ cl_sm_dp_request_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *m
     cb_rc = subscription->callback.dp_get_items_cb(
             msg->request->data_provide_req->xpath,
             &values, &values_cnt,
+            msg->request->data_provide_req->request_id,
+            msg->request->data_provide_req->original_xpath,
             subscription->private_ctx);
 
     pthread_mutex_unlock(&sm_ctx->subscriptions_lock);
@@ -808,7 +839,9 @@ cl_sm_dp_request_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *m
     if (SR_ERR_OK == cb_rc) {
         rc = sr_values_sr_to_gpb(values, values_cnt, &resp->response->data_provide_resp->values,
                 &resp->response->data_provide_resp->n_values);
-        CHECK_RC_MSG_GOTO(rc, cleanup, "Error by copying output values to GPB.");
+        if (SR_ERR_OK != rc) {
+            SR_LOG_ERR_MSG("Error by copying output values to GPB.");
+        }
     }
 
     /* send the response */
@@ -843,7 +876,8 @@ cl_sm_rpc_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *msg)
 
     action = msg->request->rpc_req->action;
     op_name = action ? "Action" : "RPC";
-    SR_LOG_DBG("Received %s request for subscription id=%"PRIu32".", op_name, msg->request->rpc_req->subscription_id);
+    SR_LOG_DBG("Received %s request (%s) for subscription id=%"PRIu32".",
+            op_name, msg->request->rpc_req->xpath, msg->request->rpc_req->subscription_id);
 
     /* copy input values from GPB */
     if (msg->request->rpc_req->n_input) {
@@ -931,16 +965,20 @@ cl_sm_event_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *
 {
     cl_sm_subscription_ctx_t *subscription = NULL;
     cl_sm_subscription_ctx_t subscription_lookup = { 0, };
+    sr_ev_notif_type_t notif_type = 0;
     sr_val_t *values = NULL;
     sr_node_t *trees = NULL;
     size_t values_cnt = 0;
     size_t tree_cnt = 0;
+    bool skip = false;
     int rc = SR_ERR_OK;
 
     CHECK_NULL_ARG4(sm_ctx, msg, msg->request, msg->request->event_notif_req);
 
-    SR_LOG_DBG("Received an event notification for subscription id=%"PRIu32".",
-            msg->request->event_notif_req->subscription_id);
+    notif_type = sr_ev_notification_type_gpb_to_sr(msg->request->event_notif_req->type);
+
+    SR_LOG_DBG("Received an event notification type=%u for subscription id=%"PRIu32".",
+            notif_type, msg->request->event_notif_req->subscription_id);
 
     /* copy input data from GPB */
     if (msg->request->event_notif_req->n_values) {
@@ -964,14 +1002,41 @@ cl_sm_event_notif_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn, Sr__Msg *
         goto cleanup;
     }
 
-    SR_LOG_DBG("Calling event notification callback for subscription id=%"PRIu32".", subscription->id);
+    /* update the replaying flag */
+    if (SR_EV_NOTIF_T_REPLAY_COMPLETE == notif_type) {
+        int retries = 0;
+        while (retries <= SR_REPLAYING_RETRIES) {
+            if (subscription->replaying) {
+                break;
+            } else {
+                usleep(SR_REPLAYING_FLAG_TIMEOUT_MS * 1000);
+            }
+            ++retries;
+        }
+        subscription->replaying = false;
+    }
 
-    if (SR_API_VALUES == subscription->api_variant) {
-        subscription->callback.event_notif_cb(msg->request->event_notif_req->xpath, values, values_cnt,
-                subscription->private_ctx);
-    } else {
-        subscription->callback.event_notif_tree_cb(msg->request->event_notif_req->xpath, trees, tree_cnt,
-                subscription->private_ctx);
+    /* handle SR_SUBSCR_NOTIF_REPLAY_FIRST flag */
+    if (subscription->opts & SR_SUBSCR_NOTIF_REPLAY_FIRST) {
+        if (SR_EV_NOTIF_T_REALTIME == notif_type && subscription->replaying) {
+            SR_LOG_DBG_MSG("Skipping the real-time notification since replay has not finished yet.");
+            skip = true;
+        }
+    }
+
+    if (!skip) {
+        /* call the callback */
+        SR_LOG_DBG("Calling event notification callback for subscription id=%"PRIu32".", subscription->id);
+
+        if (SR_API_VALUES == subscription->api_variant) {
+            subscription->callback.event_notif_cb(notif_type,
+                    msg->request->event_notif_req->xpath, values, values_cnt,
+                    msg->request->event_notif_req->timestamp, subscription->private_ctx);
+        } else {
+            subscription->callback.event_notif_tree_cb(notif_type,
+                    msg->request->event_notif_req->xpath, trees, tree_cnt,
+                    msg->request->event_notif_req->timestamp, subscription->private_ctx);
+        }
     }
 
     pthread_mutex_unlock(&sm_ctx->subscriptions_lock);
@@ -1084,13 +1149,12 @@ cl_sm_conn_in_buff_process(cl_sm_ctx_t *sm_ctx, cl_sm_conn_ctx_t *conn)
         }
     }
 
-    if ((0 != buff_pos) && (buff_size - buff_pos) > 0) {
-        /* move unprocessed data to the front of the buffer */
-        memmove(buff->data, (buff->data + buff_pos), (buff_size - buff_pos));
+    if (0 != buff_pos) {
+        if (buff_size - buff_pos > 0) {
+            /* move unprocessed data to the front of the buffer */
+            memmove(buff->data, (buff->data + buff_pos), (buff_size - buff_pos));
+        }
         buff->pos = buff_size - buff_pos;
-    } else {
-        /* no more unprocessed data left in the buffer */
-        buff->pos = 0;
     }
 
     return rc;
@@ -1286,7 +1350,6 @@ cl_sm_accept_server_connections(cl_sm_ctx_t *sm_ctx, cl_sm_server_ctx_t *server_
             } else {
                 /* error by accept - only log the error and skip it */
                 SR_LOG_ERR("Unexpected error by accepting new connection: %s", sr_strerror_safe(errno));
-                continue;
             }
         }
     } while (-1 != clnt_fd); /* accept returns -1 when there are no more connections to accept */
@@ -1321,8 +1384,12 @@ cl_sm_server_cleanup(cl_sm_ctx_t *sm_ctx, cl_sm_server_ctx_t *server_ctx)
     if (NULL != server_ctx) {
         /* stop monitoring the server socket */
         if (sm_ctx->local_fd_watcher) {
-            cl_sm_fd_changeset_add(sm_ctx, server_ctx->listen_socket_fd, (SR_FD_INPUT_READY | SR_FD_OUTPUT_READY),
-                    SR_FD_STOP_WATCHING);
+            if (sm_ctx->local_watcher_terminate_cb) {
+                /* do nothing, we have already asked for the event loop to be stopped */
+            } else {
+                cl_sm_fd_changeset_add(sm_ctx, server_ctx->listen_socket_fd, (SR_FD_INPUT_READY | SR_FD_OUTPUT_READY),
+                        SR_FD_STOP_WATCHING);
+            }
         } else {
             if (NULL != server_ctx->server_watcher.data) {
                 ev_io_stop(sm_ctx->event_loop, &server_ctx->server_watcher);
@@ -1396,10 +1463,10 @@ cl_sm_get_server_socket_filename(cl_sm_ctx_t *sm_ctx, const char *module_name, c
         ret = mkdir(path, S_IRWXU | S_IRWXG | S_IRWXO);
         umask(old_umask);
         CHECK_ZERO_LOG_RETURN(ret, SR_ERR_INTERNAL, "Unable to create the directory '%s': %s", path, sr_strerror_safe(errno));
-        rc = sr_set_socket_dir_permissions(path, SR_DATA_SEARCH_DIR, module_name, false);
+        rc = sr_set_data_file_permissions(path, true, SR_DATA_SEARCH_DIR, module_name, false);
         if (SR_ERR_OK != rc) {
             rmdir(path);
-            SR_LOG_WRN("Attempt to subscribe to unknown '%s' module probably", module_name);
+            SR_LOG_WRN("Attempt to subscribe to unknown '%s' module.", module_name);
         }
         CHECK_RC_LOG_RETURN(rc, "Unable to set socket directory permissions for '%s'.", path);
     }
@@ -1408,13 +1475,21 @@ cl_sm_get_server_socket_filename(cl_sm_ctx_t *sm_ctx, const char *module_name, c
     snprintf(pid_str, 20, "%d", getpid());
     strncat(path, pid_str, PATH_MAX - strlen(path) - 1);
 
+#ifdef HAVE_MKSTEMPS
     /* append temporary file name part */
     strncat(path, ".XXXXXX.sock", PATH_MAX - strlen(path) - 1);
     fd = mkstemps(path, 5);
-    if (-1 != fd) {
-        close(fd);
-        unlink(path);
-    }
+#else
+    /* append temporary file name part */
+    strncat(path, ".XXXXXX", PATH_MAX - strlen(path) - 1);
+    /* cannot fail */
+    mktemp(path);
+    strncat(path, ".sock", PATH_MAX - strlen(path) - 1);
+    fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+#endif
+    CHECK_NOT_MINUS1_LOG_RETURN(fd, -1, "Failed to open unique temporary file: %s", strerror(errno));
+    close(fd);
+    unlink(path);
 
     *socket_path = strdup(path);
     CHECK_NULL_NOMEM_RETURN(*socket_path);
@@ -1441,6 +1516,7 @@ cl_sm_server_init(cl_sm_ctx_t *sm_ctx, const char *module_name, cl_sm_server_ctx
     CHECK_NULL_NOMEM_RETURN(server_ctx);
 
     server_ctx->sm_ctx = sm_ctx;
+    server_ctx->listen_socket_fd = -1;
     server_ctx->module_name = strdup(module_name);
     CHECK_NULL_NOMEM_GOTO(server_ctx->module_name, rc, cleanup);
 
@@ -1603,10 +1679,11 @@ cl_sm_event_loop_threaded(void *sm_ctx_p)
 }
 
 int
-cl_sm_init(bool local_fd_watcher, int notify_pipe[2], cl_sm_ctx_t **sm_ctx_p)
+cl_sm_init(bool local_fd_watcher, sr_fd_sm_terminated_cb local_sm_terminate_cb, int notify_pipe[2], cl_sm_ctx_t **sm_ctx_p)
 {
     cl_sm_ctx_t *ctx = NULL;
     int ret = 0, rc = SR_ERR_OK;
+    pthread_mutexattr_t mattr;
 
     CHECK_NULL_ARG(sm_ctx_p);
 
@@ -1617,6 +1694,7 @@ cl_sm_init(bool local_fd_watcher, int notify_pipe[2], cl_sm_ctx_t **sm_ctx_p)
     CHECK_NULL_NOMEM_RETURN(ctx);
 
     ctx->local_fd_watcher = local_fd_watcher;
+    ctx->local_watcher_terminate_cb = local_sm_terminate_cb;
     ctx->fd_changeset_notify_pipe[0] = notify_pipe[0];
     ctx->fd_changeset_notify_pipe[1] = notify_pipe[1];
 
@@ -1642,7 +1720,11 @@ cl_sm_init(bool local_fd_watcher, int notify_pipe[2], cl_sm_ctx_t **sm_ctx_p)
     CHECK_ZERO_MSG_GOTO(ret, rc, SR_ERR_INIT_FAILED, cleanup, "Cannot initialize subscriptions server contexts mutex.");
     ret = pthread_mutex_init(&ctx->fd_changeset_lock, NULL);
     CHECK_ZERO_MSG_GOTO(ret, rc, SR_ERR_INIT_FAILED, cleanup, "Cannot initialize fd changeset mutex.");
-    ret = pthread_mutex_init(&ctx->subscriptions_lock, NULL);
+    ret = pthread_mutexattr_init(&mattr);
+    CHECK_ZERO_MSG_GOTO(ret, rc, SR_ERR_INIT_FAILED, cleanup, "Cannot initialize mutex attribute.");
+    pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_RECURSIVE);
+    ret = pthread_mutex_init(&ctx->subscriptions_lock, &mattr);
+    pthread_mutexattr_destroy(&mattr);
     CHECK_ZERO_MSG_GOTO(ret, rc, SR_ERR_INIT_FAILED, cleanup, "Cannot initialize subscriptions mutex.");
 
     srand(time(NULL));
@@ -1687,8 +1769,12 @@ void
 cl_sm_cleanup(cl_sm_ctx_t *sm_ctx, bool join)
 {
     if (NULL != sm_ctx) {
-        if (!sm_ctx->local_fd_watcher) {
-            if (join) {
+        if (join) {
+            if (sm_ctx->local_fd_watcher) {
+                if (sm_ctx->local_watcher_terminate_cb) {
+                    sm_ctx->local_watcher_terminate_cb();
+                }
+            } else {
                 ev_async_send(sm_ctx->event_loop, &sm_ctx->stop_watcher);
                 pthread_join(sm_ctx->event_loop_thread, NULL);
             }

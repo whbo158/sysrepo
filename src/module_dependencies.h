@@ -30,20 +30,20 @@
 
 #include "sr_common.h"
 
-/*
- * @ brief Type of a dependency.
+/**
+ * @brief Type of a dependency.
  */
 typedef enum md_dep_type_e {
     MD_DEP_NONE,        /**< Invalid/Uninitialized dependency */
     MD_DEP_INCLUDE,     /**< Include */
     MD_DEP_IMPORT,      /**< Import */
-    MD_DEP_EXTENSION,   /**< Extension (augment, derived identity, ...) */
-    MD_DEP_DATA         /**< Cross-module data reference */
+    MD_DEP_EXTENSION,   /**< Extension (augment, derived identity, identityref) */
+    MD_DEP_DATA         /**< Cross-module data reference (instance-identifier, leafref) */
 } md_dep_type_t;
 
 typedef struct md_module_s md_module_t; /**< Forward declaration */
 
-/*
+/**
  * @brief Structure holding information about a module dependency.
  */
 typedef struct md_dep_s {
@@ -55,7 +55,7 @@ typedef struct md_dep_s {
                                    Items are of type (md_module_t *) */
 } md_dep_t;
 
-/*
+/**
  * @brief Structure referencing a subtree in the schema tree.
  */
 typedef struct md_subtree_ref_s {
@@ -63,7 +63,7 @@ typedef struct md_subtree_ref_s {
     md_module_t *orig; /**< Module which defines this subtree. */
 } md_subtree_ref_t;
 
-/*
+/**
  * @brief Data structure describing a single (sub)module in the context of inter-module dependencies.
  */
 typedef struct md_module_s {
@@ -77,7 +77,10 @@ typedef struct md_module_s {
 
     bool latest_revision;         /**< "true" if this is the latest installed revision of this (sub)module. */
     bool submodule;               /**< "true" if this is actually a submodule, "false" in case of a proper module. */
+    bool installed;               /**< "true" if the module was explicitly installed, not just imported (but can be implemented even if not installed) */
+    bool implemented;             /**< flag if the module is implemented, not just imported */
     bool has_data;                /**< "true" if this module defines any data-carrying elements and not only data types and identities. */
+    bool has_persist;             /**< "true" if this module has data or features. */
 
     sr_llist_t *inst_ids;         /**< List of xpaths referencing all instance-identifiers in the module.
                                        Items are of type (md_subtree_ref_t *) (one node subtrees).
@@ -98,7 +101,17 @@ typedef struct md_module_s {
     sr_llist_node_t *ll_node;     /**< Pointer to the node in ::md_ctx_t::modules which is used to store this instance. */
 } md_module_t;
 
-/*
+/**
+ * @brief A string based reference to a module (which may or may not be inserted in the dependency graph),
+ * used by ::md_insert_module and ::md_remove_modules.
+ */
+typedef struct md_module_key_s {
+    char *name;
+    char *revision_date;
+    char *filepath;
+} md_module_key_t;
+
+/**
  * @brief Context used to represent complete, transitively-closed, module dependency graph in-memory (using adjacency lists).
  *        If the context is accessed from multiple threads, use ::md_ctx_lock and ::md_ctx_unlock to protect it.
  */
@@ -112,17 +125,19 @@ typedef struct md_ctx_s {
     struct ly_ctx *ly_ctx;           /**< libyang context used for manipulation with the internal data file for dependencies. */
 
     struct lyd_node *data_tree;      /**< Graph data as loaded by libyang (not transitively closed).
-                                          Also reflects changes made using ::md_insert_module and ::md_remove_module */
+                                          Also reflects changes made using ::md_insert_module and ::md_remove_modules */
 
     sr_llist_t *modules;             /**< List of all installed modules and submodules with their dependencies.
                                           Items are of type (md_module_t *) */
+    sr_btree_t *modules_btree_by_ns; /**< Pointers to all modules and submodules stored in a balanced tree for a quicker lookup.
+                                          The tree is ordered by namespace. Items are of type  (md_module_t *) */
     sr_btree_t *modules_btree;       /**< Pointers to all modules and submodules stored in a balanced tree for a quicker lookup.
                                           Items are of type (md_module_t *)
                                           Note: The tree also frees memory allocated for all the items.  */
 } md_ctx_t;
 
 
-/*
+/**
  * @brief Create context and load the internal data file with module dependencies.
  * Caller should eventually release the context using ::md_destroy.
  *
@@ -164,6 +179,20 @@ void md_ctx_unlock(md_ctx_t *md_ctx);
 int md_destroy(md_ctx_t *md_ctx);
 
 /**
+ * @brief Deallocates instance of md_module_key_t structure.
+ *
+ * @param [in] module_key Key to deallocate.
+ */
+void md_free_module_key(md_module_key_t *module_key);
+
+/**
+ * @brief Deallocates a list of module keys.
+ *
+ * @param [in] module_key_list List of keys to deallocate.
+ */
+void md_free_module_key_list(sr_list_t *module_key_list);
+
+/**
  * @brief Get dependency-related information for a given (sub)module.
  *        "revision" set to NULL represents the latest revision.
  *
@@ -172,10 +201,23 @@ int md_destroy(md_ctx_t *md_ctx);
  * @param [in] md_ctx Module Dependencies context
  * @param [in] name Name of the (sub)module
  * @param [in] revision Revision of the (sub)module, can be empty string
+ * @param [in] being_parsed Optional, in case some modules are just being parsed, look through them as well.
  * @param [out] module Output location for the pointer referencing the module info.
  */
 int md_get_module_info(const md_ctx_t *md_ctx, const char *name, const char *revision,
-                       md_module_t **module);
+                       sr_list_t *being_parsed, md_module_t **module);
+
+/**
+ * @brief Get dependency-related information for a given (sub)module.
+ *        "revision" set to NULL represents the latest revision.
+ *
+ * @note O(log |V|) where V is a set of all modules.
+ *
+ * @param [in] md_ctx Module Dependencies context
+ * @param [in] namespace Namespace of the module
+ * @param [out] module Output location for the pointer referencing the module info.
+ */
+int md_get_module_info_by_ns(const md_ctx_t *md_ctx, const char *namespace, md_module_t **module);
 
 /**
  * @brief Create and return fullname of a (sub)module. Afterwards can be accessed using only module->fullname.
@@ -198,8 +240,10 @@ const char *md_get_module_fullname(md_module_t *module);
  * @param [in] md_ctx Module Dependencies context
  * @param [in] filepath Path leading to the file with the module schema. Should be installed in the repository
  *                      with all its imports.
+ * @param [out] implicitly_inserted A list of modules (not submodules) that were automatically inserted
+ *              (import-based dependencies). Items are pointers to md_module_key_t.
  */
-int md_insert_module(md_ctx_t *md_ctx, const char *filepath);
+int md_insert_module(md_ctx_t *md_ctx, const char *filepath, sr_list_t **implicitly_inserted);
 
 /**
  * @brief Try to remove module from the dependency graph and update all the edges.
@@ -213,10 +257,13 @@ int md_insert_module(md_ctx_t *md_ctx, const char *filepath);
  * @note O(|V| * (d_max)^3) where d_max is the maximum degree in both dependency and inverted dependency graph.
  *
  * @param [in] md_ctx Module Dependencies context
- * @param [in] name Name of the module to remove
- * @param [in] revision Revision of the module to remove, can be empty string
+ * @param [in] names Names of the modules to remove
+ * @param [in] revisions Revisions of the modules to remove, can be empty strings
+ * @param [in] count Number of modules to be removed
+ * @param [out] implicitly_removed A list of modules (not submodules) that were automatically removed
+ *              (previous import-based dependencies). Items are pointers to md_module_key_t.
  */
-int md_remove_module(md_ctx_t *md_ctx, const char *name, const char *revision);
+int md_remove_modules(md_ctx_t *md_ctx, const char * const *names, const char * const *revisions, int count, sr_list_t **implicitly_removed);
 
 /**
  * @brief Output the in-memory stored dependency graph from the given context into the internal data file

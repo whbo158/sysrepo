@@ -22,19 +22,20 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "Sysrepo.h"
-#include "Connection.h"
+#include "Sysrepo.hpp"
+#include "Connection.hpp"
 
 extern "C" {
 #include "sysrepo.h"
 }
 
-using namespace std;
+namespace sysrepo {
 
 Connection::Connection(const char *app_name, const sr_conn_options_t opts)
 {
     int ret;
     _opts = opts;
+    _conn = 0;
 
     /* connect to sysrepo */
     ret = sr_connect(app_name, _opts, &_conn);
@@ -49,14 +50,11 @@ cleanup:
     return;
 }
 
-sr_conn_ctx_t *Connection::get_conn()
-{
-    return _conn;
-}
-
 Connection::~Connection()
 {
-    if (NULL != _conn) {
+    if (nullptr != _conn) {
         sr_disconnect(_conn);
     }
+}
+
 }

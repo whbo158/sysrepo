@@ -29,10 +29,10 @@
 #include "sr_protobuf.h"
 
 /* Configuration */
-#define MEM_BLOCK_MIN_SIZE          256
-#define MAX_BLOCKS_AVAIL_FOR_ALLOC    3
-#define MAX_FREE_MEM_CONTEXTS         4
-#define MEM_PEAK_USAGE_HISTORY_LENGTH 3
+#define MEM_BLOCK_MIN_SIZE          256 /**< Minimal memory block size */
+#define MAX_BLOCKS_AVAIL_FOR_ALLOC    3 /**< Maximum number of memory block available for allocation */
+#define MAX_FREE_MEM_CONTEXTS         4 /**< Maximum number of free memory contexts */
+#define MEM_PEAK_USAGE_HISTORY_LENGTH 3 /**< Length of peak memory usage history */
 
 /**
  * @brief Internal structure representing a single memory block.
@@ -90,6 +90,17 @@ int sr_mem_new(size_t min_size, sr_mem_ctx_t **sr_mem);
 void *sr_malloc(sr_mem_ctx_t *sr_mem, size_t size);
 
 /**
+ * @brief Reallocate *new_size* instead *old_size* bytes from the *sr_mem* memory context.
+ *
+ * @param [in] sr_mem Sysrepo memory context to allocate memory from.
+ *                    If NULL then malloc is called instead.
+ * @param [in] ptr Current memory held.
+ * @param [in] old_size Size of the current memory in bytes.
+ * @param [in] new_size Size of the new memory in bytes.
+ */
+void *sr_realloc(sr_mem_ctx_t *sr_mem, void *ptr, size_t old_size, size_t new_size);
+
+/**
  * @brief Allocate zeroed memory for *nmemb* items, each having *size* bytes
  * from the *sr_mem* memory context.
  *
@@ -139,6 +150,17 @@ void sr_mem_restore(sr_mem_snapshot_t *snapshot);
  * @param [in] new_val String value to set.
  */
 int sr_mem_edit_string(sr_mem_ctx_t *sr_mem, char **string_p, const char *new_val);
+
+/**
+ * @brief Set/change value of a string using format string and a variable list of arguments.
+ *
+ * @param [in] sr_mem Sysrepo memory context to use for memory allocation.
+ *                    If NULL, calloc is used instead.
+ * @param [in] string_p Pointer to the string to be changed.
+ * @param [in] format Format string of value to set.
+ * @param [in] args Variable list of arguments to the format string.
+ */
+int sr_mem_edit_string_va(sr_mem_ctx_t *sr_mem, char **string_p, const char *format, va_list args);
 
 /**
  * @brief Deallocate an instance of Sr__Msg.

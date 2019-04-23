@@ -25,6 +25,10 @@
 
 #include <stdio.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * @defgroup trees Tree Manipulation Utilities
  * @{
@@ -66,6 +70,15 @@ int sr_new_tree(const char *root_name, const char *root_module_name, sr_node_t *
 int sr_new_trees(size_t tree_cnt, sr_node_t **trees);
 
 /**
+ * @brief Reallocate an array of sysrepo trees (uninitialized tree roots).
+ *
+ * @param [in] old_tree_cnt Current length of the tree array.
+ * @param [in] new_tree_cnt Desired length of the tree array.
+ * @param [in,out] trees Returned newly allocated/enlarged array of trees.
+ */
+int sr_realloc_trees(size_t old_tree_cnt, size_t new_tree_cnt, sr_node_t **trees);
+
+/**
  * @brief Set/change name of a Sysrepo node.
  *
  * @param [in] node Sysrepo node to change the name of.
@@ -82,12 +95,23 @@ int sr_node_set_name(sr_node_t *node, const char *name);
 int sr_node_set_module(sr_node_t *node, const char *module_name);
 
 /**
- * @brief Store string into the Sysrepo node data.
+ * @brief Store data of string type into the Sysrepo node data.
  *
  * @param [in] node Sysrepo node to edit.
+ * @param [in] type Exact type of the data.
  * @param [in] string_val String value to set.
  */
-int sr_node_set_string(sr_node_t *node, const char *string_val);
+int sr_node_set_str_data(sr_node_t *node, sr_type_t type, const char *string_val);
+
+/**
+ * @brief Store data of string type into the Sysrepo node data. The actual data
+ * will be built from the a format string and a variable arguments list.
+ *
+ * @param [in] node Sysrepo node to edit.
+ * @param [in] type Exact type of the data.
+ * @param [in] format Format string used to build the data.
+ */
+int sr_node_build_str_data(sr_node_t *node, sr_type_t type, const char *format, ...);
 
 /**
  * @brief Create a new child for a given Sysrepo node.
@@ -108,7 +132,7 @@ int sr_node_add_child(sr_node_t *parent, const char *child_name, const char *chi
  * @param [in] tree Sysrepo tree to duplicate.
  * @param [out] tree_dup Returned duplicate of the input tree.
  */
-int sr_dup_tree(sr_node_t *tree, sr_node_t **tree_dup);
+int sr_dup_tree(const sr_node_t *tree, sr_node_t **tree_dup);
 
 /**
  * @brief Duplicate an array of trees (with or without Sysrepo memory context) into a new
@@ -118,7 +142,15 @@ int sr_dup_tree(sr_node_t *tree, sr_node_t **tree_dup);
  * @param [in] count Size of the array to duplicate.
  * @param [out] trees_dup Returned duplicate of the input array.
  */
-int sr_dup_trees(sr_node_t *trees, size_t count, sr_node_t **trees_dup);
+int sr_dup_trees(const sr_node_t *trees, size_t count, sr_node_t **trees_dup);
+
+/**
+ * @brief Print sysrepo tree to STDOUT.
+ *
+ * @param [in] tree Sysrepo tree to print.
+ * @param [in] depth_limit Maximum number of tree levels to print.
+ */
+int sr_print_tree(const sr_node_t *tree, int depth_limit);
 
 /**
  * @brief Print sysrepo tree to the specified file descriptor.
@@ -127,7 +159,7 @@ int sr_dup_trees(sr_node_t *trees, size_t count, sr_node_t **trees_dup);
  * @param [in] tree Sysrepo tree to print.
  * @param [in] depth_limit Maximum number of tree levels to print.
  */
-int sr_print_tree_fd(int fd, sr_node_t *tree, int depth_limit);
+int sr_print_tree_fd(int fd, const sr_node_t *tree, int depth_limit);
 
 /**
  * @brief Print sysrepo tree to the specified output file stream.
@@ -136,7 +168,7 @@ int sr_print_tree_fd(int fd, sr_node_t *tree, int depth_limit);
  * @param [in] tree Sysrepo tree to print.
  * @param [in] depth_limit Maximum number of tree levels to print.
  */
-int sr_print_tree_stream(FILE *stream, sr_node_t *tree, int depth_limit);
+int sr_print_tree_stream(FILE *stream, const sr_node_t *tree, int depth_limit);
 
 /**
  * @brief Print sysrepo tree into a newly allocated memory buffer.
@@ -146,7 +178,7 @@ int sr_print_tree_stream(FILE *stream, sr_node_t *tree, int depth_limit);
  * @param [in] tree Sysrepo tree to print.
  * @param [in] depth_limit Maximum number of tree levels to print.
  */
-int sr_print_tree_mem(char **mem_p, sr_node_t *tree, int depth_limit);
+int sr_print_tree_mem(char **mem_p, const sr_node_t *tree, int depth_limit);
 
 /**
  * @brief Returns pointer to the first child (based on the schema) of a given node.
@@ -186,5 +218,9 @@ sr_node_t *sr_node_get_next_sibling(sr_session_ctx_t *session, sr_node_t *node);
 sr_node_t *sr_node_get_parent(sr_session_ctx_t *session, sr_node_t *node);
 
 /**@} trees */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SYSREPO_TREES_H_ */

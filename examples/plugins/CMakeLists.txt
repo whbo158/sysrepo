@@ -4,6 +4,8 @@ include_directories("${PROJECT_SOURCE_DIR}/inc")
 add_library(turing-machine SHARED turing-machine.c)
 target_link_libraries(turing-machine sysrepo)
 
-# plugins should be installed into ${PLUGINS_DIR}
-# (default is "${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}/sysrepo/plugins/")
+# oven plugin
+add_library(oven SHARED oven.c)
+target_link_libraries(oven sysrepo)
+
 install(TARGETS turing-machine DESTINATION ${PLUGINS_DIR})

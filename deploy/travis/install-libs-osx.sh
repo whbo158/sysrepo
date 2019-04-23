@@ -3,6 +3,7 @@ brew update
 brew install protobuf-c
 brew install libev
 brew install pcre
+brew install swig305
 
 set -e
 
@@ -23,15 +24,15 @@ if [ ! -d "$INSTALL_PREFIX_DIR/lib" ]; then
 
     #libredblack
     git clone https://github.com/sysrepo/libredblack.git
-    cd libredblack; ./configure && make && make install
+    cd libredblack; ./configure --mandir=/tmp && make && make install
 else
     echo "Using cached libraries from $INSTALL_PREFIX_DIR"
 fi
 
-if [[ "$TRAVIS_BRANCH" == "devel" ]]; then
-    git clone -b devel https://github.com/CESNET/libyang.git
-else
+if [[ (( "$TRAVIS_BRANCH" == *"master"* )) || (( "$TRAVIS_TAG" =~ "v"[0-9]+"."[0-9]+"."[0-9]+ )) ]]; then
     git clone https://github.com/CESNET/libyang.git
+else
+    git clone -b devel https://github.com/CESNET/libyang.git
 fi
 cd libyang ; mkdir build ; cd build
 cmake -DCMAKE_BUILD_TYPE=Debug -DENABLE_BUILD_TESTS=OFF ..

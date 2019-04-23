@@ -30,8 +30,6 @@ add_custom_command(
    COMMENT "Running C protocol buffer compiler on ${PROTO_FILE}"
    VERBATIM )
 
-add_custom_target(proto DEPENDS "${GENERATED_PROTO_C}" "${GENERATED_PROTO_H}")
-
 configure_file("${COMMON_DIR}/sr_constants.h.in" "${COMMON_BIN_DIR}/sr_constants.h" ESCAPE_QUOTES @ONLY)
 
 # common sources
@@ -67,10 +65,12 @@ set(SYSREPO_ENGINE_SOURCES
     rp_dt_lookup.c
     rp_dt_get.c
     rp_dt_edit.c
+    rp_dt_filter.c
     data_manager.c
     notification_processor.c
     persistence_manager.c
     module_dependencies.c
+    nacm.c
 )
 
 add_library(COMMON OBJECT ${COMMON_SOURCES})
@@ -82,7 +82,6 @@ set_property(TARGET SR_SRC PROPERTY COMPILE_FLAGS "-fPIC")
 add_library(SR_ENGINE OBJECT  ${SYSREPO_ENGINE_SOURCES})
 set_property(TARGET SR_ENGINE PROPERTY COMPILE_FLAGS "-fPIC")
 
-add_dependencies(COMMON proto)
 add_dependencies(SR_SRC COMMON)
 add_dependencies(SR_ENGINE COMMON)
 
@@ -99,6 +98,8 @@ endif()
 
 # sysrepo library
 add_library(sysrepo SHARED $<TARGET_OBJECTS:COMMON> $<TARGET_OBJECTS:SR_ENGINE> $<TARGET_OBJECTS:SR_SRC>)
+SET_TARGET_PROPERTIES(sysrepo PROPERTIES
+              VERSION ${SYSREPO_VERSION} SOVERSION ${SYSREPO_SOVERSION})
 add_library(sysrepo_a $<TARGET_OBJECTS:COMMON> $<TARGET_OBJECTS:SR_ENGINE> $<TARGET_OBJECTS:SR_SRC>)
 SET_TARGET_PROPERTIES(sysrepo_a PROPERTIES
               OUTPUT_NAME sysrepo CLEAN_DIRECT_OUTPUT 1)
@@ -121,10 +122,7 @@ target_link_libraries(sysrepoctl sysrepo ${YANG_LIBRARIES})
 add_executable(sysrepocfg ${EXECUTABLES_DIR}/sysrepocfg.c)
 target_link_libraries(sysrepocfg sysrepo ${YANG_LIBRARIES})
 
-install(TARGETS sysrepo DESTINATION ${LIB_INSTALL_DIR})
-install(TARGETS sysrepo_a DESTINATION ${LIB_INSTALL_DIR})
-install(TARGETS sysrepod DESTINATION ${BIN_INSTALL_DIR})
-install(TARGETS sysrepo-plugind DESTINATION ${BIN_INSTALL_DIR})
-install(TARGETS sysrepoctl DESTINATION ${BIN_INSTALL_DIR})
-install(TARGETS sysrepocfg DESTINATION ${BIN_INSTALL_DIR})
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/inc/" DESTINATION ${INCLUDE_INSTALL_DIR})
+install(TARGETS sysrepo DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS sysrepo_a DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS sysrepod sysrepo-plugind sysrepoctl sysrepocfg DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/inc/" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

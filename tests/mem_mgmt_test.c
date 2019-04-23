@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 
 #include "sr_common.h"
+#include "system_helper.h"
 
 /**
  * @brief Get number of memory blocks allocated in a context.
@@ -187,7 +188,7 @@ sr_malloc_test (void **state)
     mem_block = get_mem_block(sr_mem, -1);
     assert_int_equal(mem_block1_size, mem_block->size);
     assert_ptr_equal(mem_block->mem, mem);
- 
+
     /* sysrepo malloc, 10 bytes */
     size = 10;
     mem = sr_malloc(sr_mem, size);
@@ -266,6 +267,114 @@ sr_malloc_test (void **state)
     sr_mem_free(sr_mem);
 }
 
+static void
+sr_realloc_test (void **state)
+{
+    int rc = SR_ERR_OK;
+    sr_mem_ctx_t *sr_mem = NULL;
+    size_t size = 0;
+    size_t mem_block1_size = MEM_BLOCK_MIN_SIZE;
+    size_t mem_block2_size = MEM_BLOCK_MIN_SIZE + (MEM_BLOCK_MIN_SIZE >> 1);
+    const sr_mem_block_t *mem_block = NULL;
+    void *mem = NULL, *mem2 = NULL;
+
+    /* fctx pool is reused from sr_malloc_test, so we have much bugger pool :-/ */
+    rc = sr_mem_new(0, &sr_mem);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* sysrepo realloc, new 10 bytes */
+    size = 10;
+    mem = sr_realloc(sr_mem, NULL, 0, size);
+    assert_non_null(mem);
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(size, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_int_equal(mem_block1_size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem);
+
+    /* sysrepo realloc, to 20 bytes */
+    size = 20;
+    mem = sr_realloc(sr_mem, mem, 10, size);
+    assert_non_null(mem);
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_int_equal(mem_block1_size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem);
+
+    /* sysrepo realloc, to MEM_BLOCK_MIN_SIZE bytes */
+    size = mem_block1_size;
+    mem = sr_realloc(sr_mem, mem, 20, size);
+    assert_non_null(mem);
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_int_equal(size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem);
+
+    /* sysrepo realloc, to (1.5*MEM_BLOCK_MIN_SIZE - 10) bytes */
+    size = mem_block2_size - 10;
+    mem = sr_realloc(sr_mem, mem, mem_block1_size, size);
+    assert_non_null(mem);
+    check_num_of_mem_blocks(sr_mem, 2);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total + mem_block1_size, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total + mem_block1_size);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_int_equal(mem_block2_size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem);
+
+    /* sysrepo realloc, new 1 MiB */
+    size = 1 << 20;
+    mem2 = sr_realloc(sr_mem, NULL, 0, size);
+    check_num_of_mem_blocks(sr_mem, 2);
+    assert_non_null(mem2);
+    check_mem_block_usage(sr_mem, 0, mem_block2_size - 10, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first->next);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(sr_mem->size_total, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total + mem_block1_size);
+    mem_block = get_mem_block(sr_mem, 1);
+    assert_int_equal(size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem2);
+
+    /* sysrepo realloc, to (1.5*MEM_BLOCK_MIN_SIZE) bytes (from the first block) */
+    size = mem_block2_size;
+    mem = sr_realloc(sr_mem, mem, mem_block2_size-10, size);
+    assert_non_null(mem);
+    check_num_of_mem_blocks(sr_mem, 2);
+    check_mem_block_usage(sr_mem, 0, size, 1 << 20);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first->next);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(sr_mem->size_total, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(sr_mem->piggy_back, sr_mem->size_total + mem_block1_size);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_int_equal(size, mem_block->size);
+    assert_ptr_equal(mem_block->mem, mem);
+
+    sr_mem_free(sr_mem);
+}
+
 static int
 memory_is_zeroed(char *buf, size_t size)
 {
@@ -307,7 +416,7 @@ sr_calloc_test (void **state)
     mem_block = get_mem_block(sr_mem, 0);
     assert_int_equal(mem_block1_size, mem_block->size);
     assert_ptr_equal(mem_block->mem, mem);
- 
+
     /* sysrepo calloc, 10 bytes */
     size = 10;
     mem = sr_calloc(sr_mem, 2, size >> 1);
@@ -432,7 +541,7 @@ sr_mem_snapshot_test(void **state)
         mem_block = get_mem_block(sr_mem, 0);
         assert_int_equal(mem_block1_size, mem_block->size);
         assert_ptr_equal(mem_block->mem, mem);
-     
+
         /* sysrepo calloc, 10 bytes */
         size = 10;
         mem = sr_calloc(sr_mem, 2, size >> 1);
@@ -448,7 +557,7 @@ sr_mem_snapshot_test(void **state)
         mem_block = get_mem_block(sr_mem, 0);
         assert_int_equal(mem_block1_size, mem_block->size);
         assert_ptr_equal(mem_block->mem + size, mem);
- 
+
         /* sysrepo calloc, (MEM_BLOCK_MIN_SIZE-20) bytes */
         size = mem_block1_size - 20;
         mem = sr_calloc(sr_mem, 1, size);
@@ -464,7 +573,7 @@ sr_mem_snapshot_test(void **state)
         mem_block = get_mem_block(sr_mem, 0);
         assert_int_equal(mem_block1_size, mem_block->size);
         assert_ptr_equal(mem_block->mem + 20, mem);
-    
+
         /* sysrepo calloc, (1.5*MEM_BLOCK_MIN_SIZE - 10) bytes */
         size = mem_block2_size - 10;
         mem = sr_calloc(sr_mem, 1, size);
@@ -536,7 +645,7 @@ sr_mem_edit_string_test(void **state)
     int rc = SR_ERR_OK;
     sr_mem_ctx_t *sr_mem = NULL;
     size_t size = 0;
-    char *string = NULL; 
+    char *string = NULL;
     const sr_mem_block_t *mem_block = NULL;
     const size_t size_total = 2*MEM_BLOCK_MIN_SIZE + (MEM_BLOCK_MIN_SIZE>>1) + (1<<20); /* reused from sr_malloc_test */
 
@@ -563,7 +672,7 @@ sr_mem_edit_string_test(void **state)
     rc = sr_mem_new(0, &sr_mem);
     assert_int_equal(SR_ERR_OK, rc);
 
-    /* sysrepo "strdup" */ 
+    /* sysrepo "strdup" */
     rc = sr_mem_edit_string(sr_mem, &string, STRING_VALUE);
     assert_int_equal(SR_ERR_OK, rc);
     assert_non_null(string);
@@ -611,6 +720,116 @@ sr_mem_edit_string_test(void **state)
     assert_ptr_equal(mem_block->mem + strlen(STRING_VALUE) + 1, string);
 
     sr_mem_free(sr_mem);
+
+#undef STRING_VALUE
+#undef SHORTER_STRING_VALUE
+#undef LONGER_STRING_VALUE
+}
+
+static int
+sr_mem_edit_string_va_wrapper(sr_mem_ctx_t *sr_mem, char **string_p, const char *format, ...)
+{
+    va_list arg_list;
+    int rc = SR_ERR_OK;
+
+    va_start(arg_list, format);
+    rc = sr_mem_edit_string_va(sr_mem, string_p, format, arg_list);
+    va_end(arg_list);
+
+    return rc;
+}
+
+static void
+sr_mem_edit_string_va_test(void **state)
+{
+    int rc = SR_ERR_OK;
+    sr_mem_ctx_t *sr_mem = NULL;
+    size_t size = 0;
+    char *string = NULL;
+    const sr_mem_block_t *mem_block = NULL;
+    const size_t size_total = 2*MEM_BLOCK_MIN_SIZE + (MEM_BLOCK_MIN_SIZE>>1) + (1<<20); /* reused from sr_malloc_test */
+
+#define STRING_TEMPLATE "String value %d"
+#define STRING_VALUE "String value 123"
+#define SHORTER_STRING_TEMPLATE "value %d"
+#define SHORTER_STRING_VALUE "value 456"
+#define LONGER_STRING_TEMPLATE "Longer string value %d"
+#define LONGER_STRING_VALUE "Longer string value 789"
+
+    /* standard strdup */
+    rc = sr_mem_edit_string_va_wrapper(NULL, &string, STRING_TEMPLATE, 123);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    assert_int_equal(0, strcmp(string, STRING_VALUE));
+    rc = sr_mem_edit_string_va_wrapper(NULL, &string, SHORTER_STRING_TEMPLATE, 456);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    assert_int_equal(0, strcmp(string, SHORTER_STRING_VALUE));
+    rc = sr_mem_edit_string_va_wrapper(NULL, &string, LONGER_STRING_TEMPLATE, 789);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    assert_int_equal(0, strcmp(string, LONGER_STRING_VALUE));
+    free(string);
+    string = NULL;
+
+    rc = sr_mem_new(0, &sr_mem);
+    assert_int_equal(SR_ERR_OK, rc);
+
+    /* sysrepo "strdup" */
+    rc = sr_mem_edit_string_va_wrapper(sr_mem, &string, STRING_TEMPLATE, 123);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    size = strlen(STRING_VALUE) + 1;
+    assert_int_equal(0, strcmp(string, STRING_VALUE));
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(size_total, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_ptr_equal(mem_block->mem, string);
+
+    /* overwrite */
+    rc = sr_mem_edit_string_va_wrapper(sr_mem, &string, SHORTER_STRING_TEMPLATE, 456);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    assert_int_equal(0, strcmp(string, SHORTER_STRING_VALUE));
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(size_total, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_ptr_equal(mem_block->mem, string);
+
+    /* realloc */
+    rc = sr_mem_edit_string_va_wrapper(sr_mem, &string, LONGER_STRING_TEMPLATE, 789);
+    assert_int_equal(SR_ERR_OK, rc);
+    assert_non_null(string);
+    size += strlen(LONGER_STRING_VALUE) + 1;
+    assert_int_equal(0, strcmp(string, LONGER_STRING_VALUE));
+    check_num_of_mem_blocks(sr_mem, 3);
+    check_mem_block_usage(sr_mem, 0, 0, size);
+    assert_ptr_equal(sr_mem->cursor, sr_mem->mem_blocks->first);
+    assert_int_equal(sr_mem->used_total, sr_mem->peak);
+    assert_int_equal(size, sr_mem->used_total);
+    assert_int_equal(0, sr_mem->obj_count);
+    assert_int_equal(size_total, sr_mem->size_total);
+    mem_block = get_mem_block(sr_mem, 0);
+    assert_ptr_equal(mem_block->mem + strlen(STRING_VALUE) + 1, string);
+
+    sr_mem_free(sr_mem);
+
+#undef STRING_TEMPLATE
+#undef STRING_VALUE
+#undef SHORTER_STRING_TEMPLATE
+#undef SHORTER_STRING_VALUE
+#undef LONGER_STRING_TEMPLATE
+#undef LONGER_STRING_VALUE
 }
 
 int
@@ -621,8 +840,12 @@ main() {
         cmocka_unit_test(sr_calloc_test),
         cmocka_unit_test(sr_mem_snapshot_test),
         cmocka_unit_test(sr_mem_edit_string_test),
-
+        cmocka_unit_test(sr_mem_edit_string_va_test),
+        cmocka_unit_test(sr_realloc_test),
     };
 
-    return cmocka_run_group_tests(tests, NULL, NULL);
+    watchdog_start(300);
+    int ret = cmocka_run_group_tests(tests, NULL, NULL);
+    watchdog_stop();
+    return ret;
 }

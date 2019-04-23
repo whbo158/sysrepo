@@ -30,6 +30,7 @@
 
 #include "sysrepo.h"
 #include "test_module_helper.h"
+#include "system_helper.h"
 
 #define POLL_SIZE 32
 
@@ -86,7 +87,7 @@ cl_fd_start_watching(int fd, int events)
     for (size_t j = 0; j < poll_fd_cnt; j++) {
         if (fd == poll_fd_set[j].fd) {
             /* fond existing entry */
-            poll_fd_set[poll_fd_cnt].events |= (SR_FD_INPUT_READY == events) ? POLLIN : POLLOUT;
+            poll_fd_set[j].events |= (SR_FD_INPUT_READY == events) ? POLLIN : POLLOUT;
             matched = true;
         }
     }
@@ -133,6 +134,14 @@ cl_fd_change_set_process(sr_fd_change_t *fd_change_set, size_t fd_change_set_cnt
     }
 }
 
+static int sm_flush_count = 0;
+
+void
+cb_flush_events()
+{
+    ++sm_flush_count;
+}
+
 static void
 cl_fd_poll_test(void **state)
 {
@@ -148,8 +157,9 @@ cl_fd_poll_test(void **state)
     bool callback_called = false;
 
     /* init app-local watcher */
-    rc = sr_fd_watcher_init(&init_fd);
+    rc = sr_fd_watcher_init(&init_fd, &cb_flush_events);
     assert_int_equal(rc, SR_ERR_OK);
+    assert_int_equal(sm_flush_count, 0);
 
     poll_fd_set[0].fd = init_fd;
     poll_fd_set[0].events = POLLIN;
@@ -170,6 +180,8 @@ cl_fd_poll_test(void **state)
 
     /* commit changes */
     rc = sr_commit(session);
+    assert_int_equal(rc, SR_ERR_OK);
+    rc = sr_copy_config(session, "example-module", SR_DS_CANDIDATE, SR_DS_RUNNING);
     assert_int_equal(rc, SR_ERR_OK);
 
     do {
@@ -197,10 +209,12 @@ cl_fd_poll_test(void **state)
             }
         }
     } while ((SR_ERR_OK == rc) && !callback_called);
+    assert_int_equal(sm_flush_count, 0);
 
     /* unsubscribe after callback has been called */
     rc = sr_unsubscribe(session, subscription);
     assert_int_equal(rc, SR_ERR_OK);
+    assert_int_equal(sm_flush_count, 1);
     callback_called = false;
 
     /* stop the session */
@@ -209,6 +223,8 @@ cl_fd_poll_test(void **state)
 
     /* cleanup app-local watcher */
     sr_fd_watcher_cleanup();
+
+    assert_int_equal(sm_flush_count, 1);
 }
 
 int
@@ -218,5 +234,8 @@ main()
         cmocka_unit_test_setup_teardown(cl_fd_poll_test, sysrepo_setup, sysrepo_teardown),
     };
 
-    return cmocka_run_group_tests(tests, NULL, NULL);
+    watchdog_start(300);
+    int ret = cmocka_run_group_tests(tests, NULL, NULL);
+    watchdog_stop();
+    return ret;
 }

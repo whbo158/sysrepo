@@ -25,7 +25,6 @@
 #include <signal.h>
 #include <string.h>
 #include <inttypes.h>
-#include <limits.h>
 
 #include "sysrepo.h"
 #include "sysrepo/values.h"
@@ -34,16 +33,16 @@
 volatile int exit_application = 0;
 
 static int
-data_provider_cb(const char *xpath, sr_val_t **values, size_t *values_cnt, void *private_ctx)
+data_provider_cb(const char *xpath, sr_val_t **values, size_t *values_cnt,
+        uint64_t request_id, const char *original_xpath, void *private_ctx)
 {
     sr_val_t *v = NULL;
-    char xpath_buf[PATH_MAX] = { 0, };
     sr_xpath_ctx_t xp_ctx = {0};
     int rc = SR_ERR_OK;
 
     printf("Data for '%s' requested.\n", xpath);
 
-    if (0 == strcmp(sr_xpath_node_name(xpath), "interface")) {
+    if (sr_xpath_node_name_eq(xpath, "interface")) {
         /* return all 'interface' list instances with their details */
 
         /* allocate space for data to return */
@@ -53,24 +52,20 @@ data_provider_cb(const char *xpath, sr_val_t **values, size_t *values_cnt, void 
         }
 
         sr_val_set_xpath(&v[0], "/ietf-interfaces:interfaces-state/interface[name='eth0']/type");
-        v[0].type = SR_IDENTITYREF_T;
-        sr_val_set_string(&v[0], "ethernetCsmacd");
+        sr_val_set_str_data(&v[0], SR_IDENTITYREF_T, "ethernetCsmacd");
 
         sr_val_set_xpath(&v[1], "/ietf-interfaces:interfaces-state/interface[name='eth0']/oper-status");
-        v[1].type = SR_ENUM_T;
-        sr_val_set_string(&v[1], "down");
+        sr_val_set_str_data(&v[1], SR_ENUM_T, "down");
 
         sr_val_set_xpath(&v[2], "/ietf-interfaces:interfaces-state/interface[name='eth1']/type");
-        v[2].type = SR_IDENTITYREF_T;
-        sr_val_set_string(&v[2], "ethernetCsmacd");
+        sr_val_set_str_data(&v[2], SR_IDENTITYREF_T, "iana-if-type:ethernetCsmacd");
 
         sr_val_set_xpath(&v[3], "/ietf-interfaces:interfaces-state/interface[name='eth1']/oper-status");
-        v[3].type = SR_ENUM_T;
-        sr_val_set_string(&v[3], "up");
+        sr_val_set_str_data(&v[3], SR_ENUM_T, "up");
 
         *values = v;
         *values_cnt = 4;
-    } else if (0 == strcmp(sr_xpath_node_name(xpath), "statistics")) {
+    } else if (sr_xpath_node_name_eq(xpath, "statistics")) {
         /* return contents of 'statistics' NESTED container for the given list instance */
 
         /* allocate space for data to return */
@@ -79,21 +74,20 @@ data_provider_cb(const char *xpath, sr_val_t **values, size_t *values_cnt, void 
             return rc;
         }
 
-        snprintf(xpath_buf, PATH_MAX, "%s/%s", xpath, "discontinuity-time");
-        sr_val_set_xpath(&v[0], xpath_buf);
-        v[0].type = SR_STRING_T;
+        sr_val_build_xpath(&v[0], "%s/%s", xpath, "discontinuity-time");
 
-        /* just return something different for eth0 and eth1 */
-        if (0 == strcmp(sr_xpath_key_value(xpath_buf, "interface", "name", &xp_ctx), "eth0")) {
-            sr_val_set_string(&v[0], "1987-08-31T17:00:30.44Z");
+        /* just to return something different for eth0 and eth1 */
+        if (0 == strcmp(sr_xpath_key_value((char*)xpath, "interface", "name", &xp_ctx), "eth0")) {
+            sr_val_set_str_data(&v[0], SR_STRING_T, "1987-08-31T17:00:30.44Z");
         } else {
-            sr_val_set_string(&v[0], "2016-10-06T15:12:50.52Z");
+            sr_val_set_str_data(&v[0], SR_STRING_T, "2016-10-06T15:12:50.52Z");
         }
+        sr_xpath_recover(&xp_ctx); /* we modified const string! - let's recover it */
 
         *values = v;
         *values_cnt = 1;
     } else {
-        /* statistics, ipv4 and ipv6 nested containers not implemented in this example */
+        /* ipv4 and ipv6 nested containers not implemented in this example */
         *values = NULL;
         values_cnt = 0;
     }
@@ -114,7 +108,7 @@ data_provider(sr_session_ctx_t *session)
     int rc = SR_ERR_OK;
 
     /* subscribe for providing operational data */
-    rc = sr_dp_get_items_subscribe(session, "/ietf-interfaces:interfaces-state/interface", data_provider_cb, NULL,
+    rc = sr_dp_get_items_subscribe(session, "/ietf-interfaces:interfaces-state", data_provider_cb, NULL,
             SR_SUBSCR_DEFAULT, &subscription);
     if (SR_ERR_OK != rc) {
         fprintf(stderr, "Error by sr_dp_get_items_subscribe: %s\n", sr_strerror(rc));
@@ -139,45 +133,6 @@ cleanup:
     return rc;
 }
 
-void
-print_value(sr_val_t *value)
-{
-    printf("%s ", value->xpath);
-
-    switch (value->type) {
-    case SR_CONTAINER_T:
-    case SR_CONTAINER_PRESENCE_T:
-        printf("(container)\n");
-        break;
-    case SR_LIST_T:
-        printf("(list instance)\n");
-        break;
-    case SR_STRING_T:
-        printf("= %s\n", value->data.string_val);
-        break;
-    case SR_BOOL_T:
-        printf("= %s\n", value->data.bool_val ? "true" : "false");
-        break;
-    case SR_UINT8_T:
-        printf("= %u\n", value->data.uint8_val);
-        break;
-    case SR_UINT16_T:
-        printf("= %u\n", value->data.uint16_val);
-        break;
-    case SR_UINT32_T:
-        printf("= %u\n", value->data.uint32_val);
-        break;
-    case SR_IDENTITYREF_T:
-        printf("= %s\n", value->data.identityref_val);
-        break;
-    case SR_ENUM_T:
-        printf("= %s\n", value->data.enum_val);
-        break;
-    default:
-        printf("(unprintable)\n");
-    }
-}
-
 static int
 data_requester(sr_session_ctx_t *session)
 {
@@ -192,7 +147,7 @@ data_requester(sr_session_ctx_t *session)
     }
 
     while (SR_ERR_OK == sr_get_item_next(session, iter, &value)) {
-        print_value(value);
+        sr_print_val(value);
         sr_free_val(value);
     }
     sr_free_val_iter(iter);

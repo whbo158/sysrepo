@@ -45,6 +45,9 @@ typedef struct cl_sm_ctx_s cl_sm_ctx_t;
  */
 typedef struct cl_sm_server_ctx_s cl_sm_server_ctx_t;
 
+/**
+ * @brief Subscription Manager clabback structure.
+ */
 typedef union cl_sm_callback_u {
         sr_feature_enable_cb feature_enable_cb;  /**< Callback to be called by feature enable/disable event. */
         sr_module_install_cb module_install_cb;  /**< Callback to be called by module (un)install event. */
@@ -67,11 +70,14 @@ typedef struct cl_sm_subscription_ctx_s {
     const char *delivery_address;                /**< Address where the notification messages should be delivered. */
     uint32_t id;                                 /**< Library-local subscription identifier. */
     const char *module_name;                     /**< Name of the YANG module witch the subscription is tied to.*/
+    const char *xpath;                           /**< XPath of the subscribed subtree, if applicable. */
     cl_sm_callback_t callback;                   /**< Callback to be called when the associated notification/action triggers. */
     sr_api_variant_t api_variant;                /**< API variant -- values vs. trees (relevant for the callback type only) */
     cl_sm_ctx_t *sm_ctx;                         /**< Associated Subscription Manager context. */
     sr_session_ctx_t *data_session;              /**< Pointer to a data session that can be used from notification callbacks. */
     void *private_ctx;                           /**< Private context pointer, opaque to sysrepo. */
+    int opts;                                    /**< Subscription options. */
+    bool replaying;                              /**< TRUE in case of an event notification subscription, which is currently replaying notifications. */
 } cl_sm_subscription_ctx_t;
 
 /**
@@ -79,13 +85,14 @@ typedef struct cl_sm_subscription_ctx_s {
  *
  * @param[in] local_fd_watcher TRUE in case that the application wants to use an application-local file descriptor
  * watcher instead of auto-created thread and event loop.
+ * @param[in] local_sm_terminate_cb Callback for synchronous flushing of event queue if using an application-local FD
  * @param[in] notify_pipe Pipe used for notifications about fd set changes towards application-local
  * file descriptor watcher.
  * @param[out] sm_ctx Subscription Manager context that can be used in subsequent SM API calls.
  *
  * @return Error code (SR_ERR_OK on success).
  */
-int cl_sm_init(bool local_fd_watcher, int notify_pipe[2], cl_sm_ctx_t **sm_ctx);
+int cl_sm_init(bool local_fd_watcher, sr_fd_sm_terminated_cb local_sm_terminate_cb, int notify_pipe[2], cl_sm_ctx_t **sm_ctx);
 
 /**
  * @brief Cleans up the Subscription Manager.
