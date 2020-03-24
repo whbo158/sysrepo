@@ -253,6 +253,29 @@ static bool is_del_oper(sr_session_ctx_t *session, char *path)
 	return ret;
 }
 
+int parse_inet(sr_session_ctx_t *session, sr_val_t *value)
+{
+	int rc = SR_ERR_OK;
+	sr_xpath_ctx_t xp_ctx = {0};
+	char *index = NULL;
+	uint8_t u8_val = 0;
+	uint32_t u32_val = 0;
+	uint64_t u64_val = 0;
+	char *nodename = NULL;
+	char err_msg[MSG_MAX_LEN] = {0};
+
+	sr_xpath_recover(&xp_ctx);
+	nodename = sr_xpath_node_name(value->xpath);
+	if (!nodename)
+		goto out;
+printf("WHB nodename:%s\n", nodename);
+	if (!strcmp(nodename, "netmask")) {
+		printf("WHB NODENAME:%s\n", nodename);
+	}
+
+out:
+	return rc;
+}
 static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abort,
 		char *ifname)
 {
@@ -288,6 +311,18 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		return rc;
 	}
 
+	for (i = 0; i < count; i++) {
+		if (values[i].type == SR_LIST_T
+		    || values[i].type == SR_CONTAINER_PRESENCE_T)
+			continue;
+
+		if (!parse_inet(session, &values[i]))
+			valid++;
+	}
+    sr_free_values(values, count);
+
+	if (!valid)
+		goto cleanup;
 cleanup:
 
 	return rc;
@@ -341,7 +376,7 @@ printf("IFNAME:%s\n", ifname);
 				 IETFIP_MODULE_NAME);
 
 			printf("SUBXPATH:%s\n", xpath);
-			//rc = config_qbv_per_port(session, xpath, abort, ifname);
+			rc = config_inet_per_port(session, xpath, abort, ifname);
 			if (rc != SR_ERR_OK)
 				break;
 		}
