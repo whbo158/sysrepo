@@ -255,12 +255,16 @@ printf("XPATH:%s\n", path);
 					&oper, &old_value, &new_value))) {
 
 		print_change(oper, old_value, new_value);
-		continue;
 
 		value = new_value ? new_value : old_value;
 		ifname = sr_xpath_key_value(value->xpath, "interface",
 					    "name", &xp_ctx);
-printf("IFNAME:%s\n", path);
+printf("IFNAME:%s\n", ifname);
+
+        sr_free_val(old_value);
+        sr_free_val(new_value);
+		continue;
+
 		if (!ifname)
 			continue;
 
