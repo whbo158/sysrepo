@@ -269,9 +269,14 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value)
 	if (!nodename)
 		goto out;
 printf("WHB nodename:%s\n", nodename);
-	if (!strcmp(nodename, "netmask")) {
-		printf("WHB NODENAME:%s\n", nodename);
-	}
+
+	if (!strcmp(nodename, "ip")) {
+		printf("\nip= %s\n", value->data.string_val);
+	} else if (!strcmp(nodename, "netmask")) {
+		printf("\nnetmask=:%s\n", value->data.string_val);
+}
+
+
 
 out:
 	return rc;
