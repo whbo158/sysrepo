@@ -226,6 +226,73 @@ cleanup:
 #define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
 #define IETFIP_MODULE_NAME "ietf-ip"
 
+static bool is_del_oper(sr_session_ctx_t *session, char *path)
+{
+	int rc = SR_ERR_OK;
+	bool ret = false;
+	sr_change_oper_t oper;
+	sr_val_t *old_value;
+	sr_val_t *new_value;
+	sr_change_iter_t *it;
+	char err_msg[MSG_MAX_LEN] = {0};
+
+	rc = sr_get_changes_iter(session, path, &it);
+	if (rc != SR_ERR_OK) {
+		snprintf(err_msg, MSG_MAX_LEN, "Get changes from %s failed",
+			 path);
+		sr_set_error(session, err_msg, path);
+		printf("ERROR: Get changes from %s failed\n", path);
+		return false;
+	}
+
+	rc = sr_get_change_next(session, it, &oper, &old_value, &new_value);
+	if (rc == SR_ERR_NOT_FOUND)
+		ret = false;
+	else if (oper == SR_OP_DELETED)
+		ret = true;
+	return ret;
+}
+
+static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abort,
+		char *ifname)
+{
+	int rc = SR_ERR_OK;
+	sr_val_t *values;
+	size_t count;
+	size_t i;
+	int valid = 0;
+	char err_msg[MSG_MAX_LEN] = {0};
+
+	rc = sr_get_items(session, path, 0, &values, &count);
+	if (rc == SR_ERR_NOT_FOUND) {
+		/*
+		 * If can't find any item, we should check whether this
+		 * container was deleted.
+		 */
+		if (is_del_oper(session, path)) {
+			printf("WARN: %s was deleted, disable %s",
+			       path, "this Instance.\n");
+			goto cleanup;
+		} else {
+			printf("WARN: %s sr_get_items: %s\n", __func__,
+			       sr_strerror(rc));
+			return SR_ERR_OK;
+		}
+	} else if (rc != SR_ERR_OK) {
+		snprintf(err_msg, MSG_MAX_LEN,
+			 "Get items from %s failed", path);
+		sr_set_error(session, err_msg, path);
+
+		printf("ERROR: %s sr_get_items: %s\n", __func__,
+		       sr_strerror(rc));
+		return rc;
+	}
+
+cleanup:
+
+	return rc;
+}
+
 int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 {
 	int rc = SR_ERR_OK;
@@ -263,7 +330,6 @@ printf("IFNAME:%s\n", ifname);
 
         sr_free_val(old_value);
         sr_free_val(new_value);
-		continue;
 
 		if (!ifname)
 			continue;
@@ -274,7 +340,7 @@ printf("IFNAME:%s\n", ifname);
 				 "%s[name='%s']/%s:*//*", IF_XPATH, ifname,
 				 IETFIP_MODULE_NAME);
 
-			printf("SUBXPATH:%s\n", path);
+			printf("SUBXPATH:%s\n", xpath);
 			//rc = config_qbv_per_port(session, xpath, abort, ifname);
 			if (rc != SR_ERR_OK)
 				break;
@@ -294,7 +360,7 @@ int inet_subtree_change_cb(sr_session_ctx_t *session, const char *module_name, c
 
 	printf("INET mod:%s path:%s event:%d\n", module_name, path, event);
 
-	snprintf(xpath, XPATH_MAX_LEN, "%s:*//*", path);
+	snprintf(xpath, XPATH_MAX_LEN, "%s:*//.", path);
 //	snprintf(xpath, XPATH_MAX_LEN, "%s/%s:*//*", IF_XPATH,
 //		 IETFIP_MODULE_NAME);
 
