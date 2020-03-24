@@ -227,7 +227,7 @@ main(int argc, char **argv)
     sr_subscription_ctx_t *subscription = NULL;
     int rc = SR_ERR_OK;
     const char *mod_name, *xpath = NULL;
-
+#if 0
     if ((argc < 2) || (argc > 3)) {
         printf("%s <module-to-subscribe> [<xpath-to-subscribe>]\n", argv[0]);
         return EXIT_FAILURE;
@@ -236,7 +236,10 @@ main(int argc, char **argv)
     if (argc == 3) {
         xpath = argv[2];
     }
-
+#else
+    mod_name = "ietf-interfaces";
+    xpath = "/ietf-interfaces:interfaces/interface";
+#endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
 
     /* turn logging on */
