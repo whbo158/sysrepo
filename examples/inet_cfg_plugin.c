@@ -33,7 +33,7 @@ print_val(const sr_val_t *value)
         return;
     }
 
-    printf("%s ", value->xpath);
+    printf("XPATH:-%s-\n", value->xpath);
 
     switch (value->type) {
     case SR_CONTAINER_T:
@@ -240,7 +240,7 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
 
-	rc = sr_get_changes_iter(session, path, &it);
+	rc = sr_get_changes_iter(session, "//.", &it);
 	if (rc != SR_ERR_OK) {
 		snprintf(err_msg, MSG_MAX_LEN,
 			 "Get changes from %s failed", path);
@@ -250,15 +250,17 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 		       sr_strerror(rc));
 		goto cleanup;
 	}
-
+printf("XPATH:%s\n", path);
 	while (SR_ERR_OK == (rc = sr_get_change_next(session, it,
 					&oper, &old_value, &new_value))) {
 
 		print_change(oper, old_value, new_value);
+		continue;
 
 		value = new_value ? new_value : old_value;
 		ifname = sr_xpath_key_value(value->xpath, "interface",
 					    "name", &xp_ctx);
+printf("IFNAME:%s\n", path);
 		if (!ifname)
 			continue;
 
@@ -267,6 +269,8 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 			snprintf(xpath, XPATH_MAX_LEN,
 				 "%s[name='%s']/%s:*//*", IF_XPATH, ifname,
 				 IETFIP_MODULE_NAME);
+
+			printf("SUBXPATH:%s\n", path);
 			//rc = config_qbv_per_port(session, xpath, abort, ifname);
 			if (rc != SR_ERR_OK)
 				break;
@@ -286,8 +290,10 @@ int inet_subtree_change_cb(sr_session_ctx_t *session, const char *module_name, c
 
 	printf("INET mod:%s path:%s event:%d\n", module_name, path, event);
 
-	snprintf(xpath, XPATH_MAX_LEN, "%s/%s:*//*", IF_XPATH,
-		 IETFIP_MODULE_NAME);
+	snprintf(xpath, XPATH_MAX_LEN, "%s:*//*", path);
+//	snprintf(xpath, XPATH_MAX_LEN, "%s/%s:*//*", IF_XPATH,
+//		 IETFIP_MODULE_NAME);
+
 	switch (event) {
 	case SR_EV_CHANGE:
 		if (rc)
