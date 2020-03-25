@@ -14,17 +14,43 @@
  */
 #define _GNU_SOURCE
 
+#include <inttypes.h>
+
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <pthread.h>
 #include <signal.h>
-#include <inttypes.h>
+#include <ctype.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <netdb.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <net/route.h>
+#include <sys/ioctl.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/time.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <linux/if_vlan.h>
+#include <linux/sockios.h>
 
 #include "sysrepo.h"
 #include "sysrepo/xpath.h"
 
+#define PRINT printf("%s-%d: ", __func__, __LINE__);printf
+#define ADDR_LEN (sizeof(struct in_addr))
+
 volatile int exit_application = 0;
+
+typedef unsigned char uint8;
 
 static void
 print_val(const sr_val_t *value)
@@ -225,6 +251,127 @@ cleanup:
 #define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
 #define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
 #define IETFIP_MODULE_NAME "ietf-ip"
+
+static int set_inet_cfg(char *ifname, int req, void *buf, int len)
+{
+	int ret = 0;
+	int sockfd = 0;
+	struct ifreq ifr = {0};
+	struct sockaddr_in *sin = NULL;
+
+	if (!ifname || !buf)
+		return -1;
+
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
+	{
+		PRINT("create socket failed! ret:%d\n", sockfd);
+		return -2;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
+
+	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
+	if (ret < 0) {
+		PRINT("get interface flag failed! ret:%d\n", ret);
+		return -3;
+	}
+
+	if (req == SIOCSIFHWADDR) {
+		memcpy(&ifr.ifr_ifru.ifru_hwaddr.sa_data, buf, IFHWADDRLEN);
+		ifr.ifr_addr.sa_family = ARPHRD_ETHER;
+	} else {
+		sin = (struct sockaddr_in *)&ifr.ifr_addr;
+		sin->sin_family = AF_INET;
+		memcpy(&sin->sin_addr, (struct in_addr *)buf, len);
+	}
+
+	ret = ioctl(sockfd, req, &ifr);
+	close(sockfd);
+	if (ret < 0) {
+		PRINT("ioctl error! ret:%d, need root account!\n", ret);
+		PRINT("Note: this operation needs root permission!\n");
+		return -4;
+	}
+
+	return 0;
+}
+
+int set_inet_ip(char *ifname, struct in_addr *ip)
+{
+	return set_inet_cfg(ifname, SIOCSIFADDR, ip, ADDR_LEN);
+}
+
+int set_inet_mask(char *ifname, struct in_addr *mask)
+{
+	return set_inet_cfg(ifname, SIOCSIFNETMASK, mask, ADDR_LEN);
+}
+
+int set_inet_mac(char *ifname, uint8 *buf)
+{
+	return set_inet_cfg(ifname, SIOCSIFHWADDR, buf, IFHWADDRLEN);
+}
+
+static int set_inet_updown(char *ifname, bool upflag)
+{
+	int ret = 0;
+	int sockfd = 0;
+	struct ifreq ifr = {0};
+	struct sockaddr_in *sin = NULL;
+
+	if (!ifname)
+		return -1;
+
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
+	{
+		PRINT("create socket failed! ret:%d\n", sockfd);
+		return -2;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
+
+	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
+	if (ret < 0) {
+		PRINT("get interface flag failed! ret:%d\n", ret);
+		return -3;
+	}
+
+	sin = (struct sockaddr_in *)&ifr.ifr_addr;
+	sin->sin_family = AF_INET;
+
+	if (upflag)
+		ifr.ifr_flags |= IFF_UP;
+	else
+		ifr.ifr_flags &= ~IFF_UP;
+
+	ret = ioctl(sockfd, SIOCSIFFLAGS, &ifr);
+	close(sockfd);
+	if (ret < 0) {
+		PRINT("ioctl error! ret:%d, need root account!\n", ret);
+		PRINT("Note: this operation needs root permission!\n");
+		return -4;
+	}
+
+	return 0;
+}
+
+bool is_valid_addr(uint8 *ip)
+{
+	int ret = 0;
+	struct in_addr ip_addr;
+
+	if (!ip)
+	      return false;
+
+	ret = inet_aton(ip, &ip_addr);
+	if (0 == ret)
+		return false;
+
+	return true;
+}
 
 static bool is_del_oper(sr_session_ctx_t *session, char *path)
 {
