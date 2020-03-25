@@ -528,7 +528,8 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
 
-	rc = sr_get_changes_iter(session, "//.", &it);
+	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
+	rc = sr_get_changes_iter(session, xpath, &it);
 	if (rc != SR_ERR_OK) {
 		snprintf(err_msg, MSG_MAX_LEN,
 			 "Get changes from %s failed", path);
@@ -538,7 +539,7 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 		       sr_strerror(rc));
 		goto cleanup;
 	}
-printf("XPATH:%s\n", path);
+printf("XPATH:%s\n", xpath);
 	while (SR_ERR_OK == (rc = sr_get_change_next(session, it,
 					&oper, &old_value, &new_value))) {
 
@@ -581,7 +582,7 @@ int inet_subtree_change_cb(sr_session_ctx_t *session, const char *module_name, c
 
 	printf("INET mod:%s path:%s event:%d\n", module_name, path, event);
 
-	snprintf(xpath, XPATH_MAX_LEN, "%s:*//.", path);
+	snprintf(xpath, XPATH_MAX_LEN, "%s", path);
 //	snprintf(xpath, XPATH_MAX_LEN, "%s/%s:*//*", IF_XPATH,
 //		 IETFIP_MODULE_NAME);
 
@@ -621,6 +622,7 @@ main(int argc, char **argv)
     sr_session_ctx_t *session = NULL;
     sr_subscription_ctx_t *subscription = NULL;
     int rc = SR_ERR_OK;
+	char path[XPATH_MAX_LEN];
     const char *mod_name, *xpath = NULL;
 #if 0
     if ((argc < 2) || (argc > 3)) {
@@ -633,7 +635,9 @@ main(int argc, char **argv)
     }
 #else
     mod_name = "ietf-interfaces";
-    xpath = "/ietf-interfaces:interfaces/interface";
+	snprintf(path, XPATH_MAX_LEN, IF_XPATH);
+	strncat(path, "/ietf-ip:ipv4", XPATH_MAX_LEN);
+	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
 
