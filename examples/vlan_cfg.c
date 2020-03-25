@@ -371,7 +371,7 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value, struct inet_cfg *conf
 		}
 	} else if (!strcmp(nodename, "name")) {
 		if (true) {
-			snprintf(conf->ifname, IF_NAME_MAX_LEN, value->data.string_val);
+			snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", value->data.string_val);
 			//printf("\nVALID netmask = %s\n", conf->ifname);
 		}
 	}
@@ -414,7 +414,7 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		       sr_strerror(rc));
 		return rc;
 	}
-	snprintf(conf->ifname, IF_NAME_MAX_LEN, ifname);
+	snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", ifname);
 	printf("value-count:%d \n", count);
 
 	for (i = 0; i < count; i++) {
@@ -561,7 +561,7 @@ main(int argc, char **argv)
     }
 #else
     mod_name = "ieee802-dot1q-bridge";
-	snprintf(path, XPATH_MAX_LEN, BRIDGE_COMPONENT_XPATH);
+	snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_COMPONENT_XPATH);
 	strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN);
 	xpath = path;
 #endif

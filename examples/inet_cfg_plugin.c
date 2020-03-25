@@ -68,7 +68,7 @@ struct inet_cfg
 {
 	struct in_addr ip;
 	struct in_addr mask;
-	char ifname[IF_NAME_MAX_LEN];
+	char ifname[IF_NAME_MAX_LEN + 1];
 };
 
 static struct inet_cfg sinet_conf;
@@ -282,7 +282,7 @@ static int set_inet_cfg(char *ifname, int req, void *buf, int len)
 
 	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
 	if (ret < 0) {
-		PRINT("get interface flag failed! ret:%d\n", ret);
+		PRINT("get interface %s flag failed! ret:%d\n", ifname, ret);
 		return -3;
 	}
 
@@ -485,9 +485,10 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		return rc;
 	}
 
-	memset(conf, 0, sizeof(struct inet_cfg));
-	snprintf(conf->ifname, IF_NAME_MAX_LEN, ifname);
-
+printf("IFNAME00:%s--len:%d\n", ifname, strlen(ifname));
+//	memset(conf, 0, sizeof(struct inet_cfg));
+	snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", ifname);
+printf("IFNAME11:%s--%s len:%d\n", ifname, conf->ifname, strlen(ifname));
 	for (i = 0; i < count; i++) {
 		if (values[i].type == SR_LIST_T
 		    || values[i].type == SR_CONTAINER_PRESENCE_T)
@@ -557,12 +558,12 @@ printf("IFNAME:%s\n", ifname);
 			continue;
 
 		if (strcmp(ifname, ifname_bak)) {
-			snprintf(ifname_bak, IF_NAME_MAX_LEN, ifname);
+			snprintf(ifname_bak, IF_NAME_MAX_LEN, "%s", ifname);
 			snprintf(xpath, XPATH_MAX_LEN,
 				 "%s[name='%s']/%s:*//*", IF_XPATH, ifname,
 				 IETFIP_MODULE_NAME);
 
-			printf("SUBXPATH:%s\n", xpath);
+			printf("SUBXPATH:%s ifname:%s len:%d\n", xpath, ifname, strlen(ifname));
 			rc = config_inet_per_port(session, xpath, abort, ifname);
 			if (rc != SR_ERR_OK)
 				break;
@@ -635,7 +636,7 @@ main(int argc, char **argv)
     }
 #else
     mod_name = "ietf-interfaces";
-	snprintf(path, XPATH_MAX_LEN, IF_XPATH);
+	snprintf(path, XPATH_MAX_LEN, "%s", IF_XPATH);
 	strncat(path, "/ietf-ip:ipv4", XPATH_MAX_LEN);
 	xpath = path;
 #endif
