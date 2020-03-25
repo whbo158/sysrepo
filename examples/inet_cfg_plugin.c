@@ -460,6 +460,11 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	char err_msg[MSG_MAX_LEN] = {0};
 	struct inet_cfg *conf = &sinet_conf;
 
+printf("IFNAME00:%s--len:%d\n", ifname, strlen(ifname));
+	memset(conf, 0, sizeof(struct inet_cfg));
+	snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", ifname);
+printf("IFNAME11:%s--%s len:%d\n", ifname, conf->ifname, strlen(ifname));
+
 	rc = sr_get_items(session, path, 0, &values, &count);
 	if (rc == SR_ERR_NOT_FOUND) {
 		/*
@@ -485,10 +490,7 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		return rc;
 	}
 
-printf("IFNAME00:%s--len:%d\n", ifname, strlen(ifname));
-//	memset(conf, 0, sizeof(struct inet_cfg));
-	snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", ifname);
-printf("IFNAME11:%s--%s len:%d\n", ifname, conf->ifname, strlen(ifname));
+
 	for (i = 0; i < count; i++) {
 		if (values[i].type == SR_LIST_T
 		    || values[i].type == SR_CONTAINER_PRESENCE_T)
@@ -526,7 +528,7 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	sr_change_oper_t oper;
 	char *ifname;
 	char ifname_bak[IF_NAME_MAX_LEN] = {0,};
-	char xpath[XPATH_MAX_LEN] = {0,};
+	char xpath[XPATH_MAX_LEN] = {0};
 	char err_msg[MSG_MAX_LEN] = {0};
 
 	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
