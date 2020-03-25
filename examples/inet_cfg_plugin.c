@@ -45,12 +45,33 @@
 #include "sysrepo.h"
 #include "sysrepo/xpath.h"
 
+#define XPATH_MAX_LEN		300
+#define IF_NAME_MAX_LEN		20
+#define NODE_NAME_MAX_LEN	80
+#define MSG_MAX_LEN		100
+
+#define IF_XPATH "/ietf-interfaces:interfaces/interface"
+#define BRIDGE_XPATH "/ieee802-dot1q-bridge:bridges/bridge"
+#define BRIDGE_COMPONENT_XPATH (BRIDGE_XPATH "/component")
+
+#define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
+#define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
+#define IETFIP_MODULE_NAME "ietf-ip"
+
 #define PRINT printf("%s-%d: ", __func__, __LINE__);printf
 #define ADDR_LEN (sizeof(struct in_addr))
 
 volatile int exit_application = 0;
 
 typedef unsigned char uint8;
+struct inet_cfg
+{
+	struct in_addr ip;
+	struct in_addr mask;
+	char ifname[IF_NAME_MAX_LEN];
+};
+
+static struct inet_cfg sinet_conf;
 
 static void
 print_val(const sr_val_t *value)
@@ -239,19 +260,6 @@ cleanup:
     return SR_ERR_OK;
 }
 
-#define XPATH_MAX_LEN		300
-#define IF_NAME_MAX_LEN		20
-#define NODE_NAME_MAX_LEN	80
-#define MSG_MAX_LEN		100
-
-#define IF_XPATH "/ietf-interfaces:interfaces/interface"
-#define BRIDGE_XPATH "/ieee802-dot1q-bridge:bridges/bridge"
-#define BRIDGE_COMPONENT_XPATH (BRIDGE_XPATH "/component")
-
-#define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
-#define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
-#define IETFIP_MODULE_NAME "ietf-ip"
-
 static int set_inet_cfg(char *ifname, int req, void *buf, int len)
 {
 	int ret = 0;
@@ -393,6 +401,9 @@ static bool is_del_oper(sr_session_ctx_t *session, char *path)
 	}
 
 	rc = sr_get_change_next(session, it, &oper, &old_value, &new_value);
+	sr_free_val(old_value);
+	sr_free_val(new_value);
+
 	if (rc == SR_ERR_NOT_FOUND)
 		ret = false;
 	else if (oper == SR_OP_DELETED)
@@ -400,7 +411,7 @@ static bool is_del_oper(sr_session_ctx_t *session, char *path)
 	return ret;
 }
 
-int parse_inet(sr_session_ctx_t *session, sr_val_t *value)
+int parse_inet(sr_session_ctx_t *session, sr_val_t *value, struct inet_cfg *conf)
 {
 	int rc = SR_ERR_OK;
 	sr_xpath_ctx_t xp_ctx = {0};
@@ -410,20 +421,30 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value)
 	uint64_t u64_val = 0;
 	char *nodename = NULL;
 	char err_msg[MSG_MAX_LEN] = {0};
+	char *strval = NULL;
+
+	if (!session || !value || !conf)
+		return rc;
+
+	strval = value->data.string_val;
 
 	sr_xpath_recover(&xp_ctx);
 	nodename = sr_xpath_node_name(value->xpath);
 	if (!nodename)
 		goto out;
-printf("WHB nodename:%s\n", nodename);
+printf("WHB nodename:%s type:%d\n", nodename, value->type);
 
 	if (!strcmp(nodename, "ip")) {
-		printf("\nip= %s\n", value->data.string_val);
+		if (is_valid_addr(strval)) {
+			conf->ip.s_addr = inet_addr(strval);
+			printf("\nVALID ip= %s\n", strval);
+		}
 	} else if (!strcmp(nodename, "netmask")) {
-		printf("\nnetmask=:%s\n", value->data.string_val);
-}
-
-
+		if (is_valid_addr(strval)) {
+			conf->mask.s_addr = inet_addr(strval);
+			printf("\nVALID netmask = %s\n", strval);
+		}
+	}
 
 out:
 	return rc;
@@ -437,6 +458,7 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	size_t i;
 	int valid = 0;
 	char err_msg[MSG_MAX_LEN] = {0};
+	struct inet_cfg *conf = &sinet_conf;
 
 	rc = sr_get_items(session, path, 0, &values, &count);
 	if (rc == SR_ERR_NOT_FOUND) {
@@ -463,19 +485,31 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		return rc;
 	}
 
+	memset(conf, 0, sizeof(struct inet_cfg));
+	snprintf(conf->ifname, IF_NAME_MAX_LEN, ifname);
+
 	for (i = 0; i < count; i++) {
 		if (values[i].type == SR_LIST_T
 		    || values[i].type == SR_CONTAINER_PRESENCE_T)
 			continue;
 
-		if (!parse_inet(session, &values[i]))
+		if (!parse_inet(session, &values[i], conf))
 			valid++;
 	}
-    sr_free_values(values, count);
 
 	if (!valid)
 		goto cleanup;
+
+	if (conf->ip.s_addr) {
+		set_inet_ip(conf->ifname, &conf->ip);
+	}
+
+	if (conf->mask.s_addr) {
+		set_inet_mask(conf->ifname, &conf->mask);
+	}
+
 cleanup:
+    sr_free_values(values, count);
 
 	return rc;
 }
@@ -508,7 +542,7 @@ printf("XPATH:%s\n", path);
 	while (SR_ERR_OK == (rc = sr_get_change_next(session, it,
 					&oper, &old_value, &new_value))) {
 
-		print_change(oper, old_value, new_value);
+		//print_change(oper, old_value, new_value);
 
 		value = new_value ? new_value : old_value;
 		ifname = sr_xpath_key_value(value->xpath, "interface",
