@@ -260,73 +260,11 @@ cleanup:
     return SR_ERR_OK;
 }
 
-static int set_inet_cfg(char *ifname, int req, void *buf, int len)
+int set_inet_vlan(char *ifname, int vid, bool addflag)
 {
 	int ret = 0;
 	int sockfd = 0;
-	struct ifreq ifr = {0};
-	struct sockaddr_in *sin = NULL;
-
-	if (!ifname || !buf)
-		return -1;
-
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0)
-	{
-		PRINT("create socket failed! ret:%d\n", sockfd);
-		return -2;
-	}
-
-	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
-
-	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
-	if (ret < 0) {
-		PRINT("get interface flag failed! ret:%d\n", ret);
-		return -3;
-	}
-
-	if (req == SIOCSIFHWADDR) {
-		memcpy(&ifr.ifr_ifru.ifru_hwaddr.sa_data, buf, IFHWADDRLEN);
-		ifr.ifr_addr.sa_family = ARPHRD_ETHER;
-	} else {
-		sin = (struct sockaddr_in *)&ifr.ifr_addr;
-		sin->sin_family = AF_INET;
-		memcpy(&sin->sin_addr, (struct in_addr *)buf, len);
-	}
-
-	ret = ioctl(sockfd, req, &ifr);
-	close(sockfd);
-	if (ret < 0) {
-		PRINT("ioctl error! ret:%d, need root account!\n", ret);
-		PRINT("Note: this operation needs root permission!\n");
-		return -4;
-	}
-
-	return 0;
-}
-
-int set_inet_ip(char *ifname, struct in_addr *ip)
-{
-	return set_inet_cfg(ifname, SIOCSIFADDR, ip, ADDR_LEN);
-}
-
-int set_inet_mask(char *ifname, struct in_addr *mask)
-{
-	return set_inet_cfg(ifname, SIOCSIFNETMASK, mask, ADDR_LEN);
-}
-
-int set_inet_mac(char *ifname, uint8 *buf)
-{
-	return set_inet_cfg(ifname, SIOCSIFHWADDR, buf, IFHWADDRLEN);
-}
-
-static int set_inet_updown(char *ifname, bool upflag)
-{
-	int ret = 0;
-	int sockfd = 0;
-	struct ifreq ifr = {0};
-	struct sockaddr_in *sin = NULL;
+	struct vlan_ioctl_args ifr;
 
 	if (!ifname)
 		return -1;
@@ -339,28 +277,22 @@ static int set_inet_updown(char *ifname, bool upflag)
 	}
 
 	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
+	ifr.u.VID = vid;
 
-	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
-	if (ret < 0) {
-		PRINT("get interface flag failed! ret:%d\n", ret);
-		return -3;
+	if (addflag) {
+		ifr.cmd = ADD_VLAN_CMD;
+		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s", ifname);
+	} else {
+		ifr.cmd = DEL_VLAN_CMD;
+		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s.%d", ifname, vid);
 	}
 
-	sin = (struct sockaddr_in *)&ifr.ifr_addr;
-	sin->sin_family = AF_INET;
-
-	if (upflag)
-		ifr.ifr_flags |= IFF_UP;
-	else
-		ifr.ifr_flags &= ~IFF_UP;
-
-	ret = ioctl(sockfd, SIOCSIFFLAGS, &ifr);
+	ret = ioctl(sockfd, SIOCSIFVLAN, &ifr);
 	close(sockfd);
 	if (ret < 0) {
 		PRINT("ioctl error! ret:%d, need root account!\n", ret);
 		PRINT("Note: this operation needs root permission!\n");
-		return -4;
+		return -3;
 	}
 
 	return 0;
@@ -499,6 +431,7 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 
 	if (conf->flag == 0) {
 		conf->flag = 1;
+		set_inet_vlan(conf->ifname, conf->vid, true);
 		printf("--------name:%s vid:%d\n", conf->ifname, conf->vid);
 	}
 
