@@ -54,8 +54,7 @@
 #define BRIDGE_XPATH "/ieee802-dot1q-bridge:bridges/bridge"
 #define BRIDGE_COMPONENT_XPATH (BRIDGE_XPATH "/component")
 
-#define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
-#define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
+#define CB_BRVLAN_XPATH "/bridge-vlan"
 #define IETFIP_MODULE_NAME "ietf-ip"
 
 #define PRINT printf("%s-%d: ", __func__, __LINE__);printf
@@ -64,10 +63,10 @@
 volatile int exit_application = 0;
 
 typedef unsigned char uint8;
+typedef unsigned int uint32;
 struct inet_cfg
 {
-	struct in_addr ip;
-	struct in_addr mask;
+	uint32 vid;
 	char ifname[IF_NAME_MAX_LEN];
 };
 
@@ -426,23 +425,21 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value, struct inet_cfg *conf
 	if (!session || !value || !conf)
 		return rc;
 
-	strval = value->data.string_val;
-
 	sr_xpath_recover(&xp_ctx);
 	nodename = sr_xpath_node_name(value->xpath);
 	if (!nodename)
 		goto out;
-printf("WHB nodename:%s type:%d\n", nodename, value->type);
+//printf("WHB nodename:%s type:%d\n", nodename, value->type);
 
-	if (!strcmp(nodename, "ip")) {
-		if (is_valid_addr(strval)) {
-			conf->ip.s_addr = inet_addr(strval);
-			printf("\nVALID ip= %s\n", strval);
+	if (!strcmp(nodename, "vid")) {
+		if (true) {
+			conf->vid = value->data.uint32_val;
+		//	printf("\nVALID ip= %d\n", conf->vid);
 		}
-	} else if (!strcmp(nodename, "netmask")) {
-		if (is_valid_addr(strval)) {
-			conf->mask.s_addr = inet_addr(strval);
-			printf("\nVALID netmask = %s\n", strval);
+	} else if (!strcmp(nodename, "name")) {
+		if (true) {
+			snprintf(conf->ifname, IF_NAME_MAX_LEN, value->data.string_val);
+			//printf("\nVALID netmask = %s\n", conf->ifname);
 		}
 	}
 
@@ -484,9 +481,9 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		       sr_strerror(rc));
 		return rc;
 	}
-
 	memset(conf, 0, sizeof(struct inet_cfg));
 	snprintf(conf->ifname, IF_NAME_MAX_LEN, ifname);
+	printf("value-count:%d \n", count);
 
 	for (i = 0; i < count; i++) {
 		if (values[i].type == SR_LIST_T
@@ -500,13 +497,7 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	if (!valid)
 		goto cleanup;
 
-	if (conf->ip.s_addr) {
-		set_inet_ip(conf->ifname, &conf->ip);
-	}
-
-	if (conf->mask.s_addr) {
-		set_inet_mask(conf->ifname, &conf->mask);
-	}
+	printf("name:%s vid:%d\n", conf->ifname, conf->vid);
 
 cleanup:
     sr_free_values(values, count);
@@ -523,46 +514,44 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	sr_val_t *new_value;
 	sr_val_t *value;
 	sr_change_oper_t oper;
-	char *ifname;
-	char ifname_bak[IF_NAME_MAX_LEN] = {0,};
+	char *vid;
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
 
-	rc = sr_get_changes_iter(session, "//.", &it);
+	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
+	rc = sr_get_changes_iter(session, xpath, &it);
 	if (rc != SR_ERR_OK) {
 		snprintf(err_msg, MSG_MAX_LEN,
-			 "Get changes from %s failed", path);
-		sr_set_error(session, err_msg, path);
+			 "Get changes from %s failed", xpath);
+		sr_set_error(session, err_msg, xpath);
 
 		printf("ERROR: %s sr_get_changes_iter: %s\n", __func__,
 		       sr_strerror(rc));
 		goto cleanup;
 	}
-printf("XPATH:%s\n", path);
+printf("XPATH:%s\n", xpath);
 	while (SR_ERR_OK == (rc = sr_get_change_next(session, it,
 					&oper, &old_value, &new_value))) {
 
-		//print_change(oper, old_value, new_value);
+		print_change(oper, old_value, new_value);
 
 		value = new_value ? new_value : old_value;
-		ifname = sr_xpath_key_value(value->xpath, "interface",
-					    "name", &xp_ctx);
-printf("IFNAME:%s\n", ifname);
+		vid = sr_xpath_key_value(value->xpath, "vlan",
+					    "vid", &xp_ctx);
+printf("IFNAME:%s\n", vid);
 
         sr_free_val(old_value);
         sr_free_val(new_value);
 
-		if (!ifname)
+		if (!vid)
 			continue;
 
-		if (strcmp(ifname, ifname_bak)) {
-			snprintf(ifname_bak, IF_NAME_MAX_LEN, ifname);
-			snprintf(xpath, XPATH_MAX_LEN,
-				 "%s[name='%s']/%s:*//*", IF_XPATH, ifname,
-				 IETFIP_MODULE_NAME);
+		if (true) {
+			//snprintf(xpath, XPATH_MAX_LEN,
+			//	 "%s[vid='%s']//*", path, vid);
 
 			printf("SUBXPATH:%s\n", xpath);
-			rc = config_inet_per_port(session, xpath, abort, ifname);
+			rc = config_inet_per_port(session, xpath, abort, vid);
 			if (rc != SR_ERR_OK)
 				break;
 		}
@@ -581,7 +570,7 @@ int inet_subtree_change_cb(sr_session_ctx_t *session, const char *module_name, c
 
 	printf("INET mod:%s path:%s event:%d\n", module_name, path, event);
 
-	snprintf(xpath, XPATH_MAX_LEN, "%s:*//.", path);
+	snprintf(xpath, XPATH_MAX_LEN, "%s", path);
 //	snprintf(xpath, XPATH_MAX_LEN, "%s/%s:*//*", IF_XPATH,
 //		 IETFIP_MODULE_NAME);
 
@@ -635,7 +624,7 @@ main(int argc, char **argv)
 #else
     mod_name = "ieee802-dot1q-bridge";
 	snprintf(path, XPATH_MAX_LEN, BRIDGE_COMPONENT_XPATH);
-	strncat(path, "/bridge-vlan", XPATH_MAX_LEN);
+	strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN);
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
@@ -660,8 +649,8 @@ main(int argc, char **argv)
     print_current_config(session, mod_name);
 
     /* subscribe for changes in running config */
-    rc = sr_module_change_subscribe(session, mod_name, xpath, module_change_cb, NULL, 0, 0, &subscription);
-    //rc = sr_module_change_subscribe(session, mod_name, xpath, inet_subtree_change_cb, NULL, 0, 0, &subscription);
+    //rc = sr_module_change_subscribe(session, mod_name, xpath, module_change_cb, NULL, 0, 0, &subscription);
+    rc = sr_module_change_subscribe(session, mod_name, xpath, inet_subtree_change_cb, NULL, 0, 0, &subscription);
     if (rc != SR_ERR_OK) {
         goto cleanup;
     }
