@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 2.8.12)
 set(CMAKE_MACOSX_RPATH TRUE)
 
 # list of all the examples
-set(examples application_changes_example inet_cfg_plugin sr_set_item_example sr_get_items_example oper_data_example notif_subscribe_example
+set(examples application_changes_example inet_cfg_plugin vlan_cfg sr_set_item_example sr_get_items_example oper_data_example notif_subscribe_example
     notif_send_example rpc_send_example rpc_subscribe_example)
 
 foreach(app_name IN LISTS examples)
