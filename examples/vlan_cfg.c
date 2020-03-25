@@ -66,6 +66,7 @@ typedef unsigned char uint8;
 typedef unsigned int uint32;
 struct inet_cfg
 {
+	int flag;
 	uint32 vid;
 	char ifname[IF_NAME_MAX_LEN];
 };
@@ -481,7 +482,6 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 		       sr_strerror(rc));
 		return rc;
 	}
-	memset(conf, 0, sizeof(struct inet_cfg));
 	snprintf(conf->ifname, IF_NAME_MAX_LEN, ifname);
 	printf("value-count:%d \n", count);
 
@@ -497,7 +497,10 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	if (!valid)
 		goto cleanup;
 
-	printf("name:%s vid:%d\n", conf->ifname, conf->vid);
+	if (conf->flag == 0) {
+		conf->flag = 1;
+		printf("--------name:%s vid:%d\n", conf->ifname, conf->vid);
+	}
 
 cleanup:
     sr_free_values(values, count);
@@ -517,6 +520,8 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char *vid;
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
+
+	memset(&sinet_conf, 0, sizeof(struct inet_cfg));
 
 	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
 	rc = sr_get_changes_iter(session, xpath, &it);
