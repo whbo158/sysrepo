@@ -372,7 +372,7 @@ printf("WHB nodename:%s type:%d\n", nodename, value->type);
 			printf("\nVALID vid= %d\n", conf->vid);
 		}
 	} else if (!strcmp(nodename, "name")) {
-		if (true) {
+		if (conf->vidflag) {
 			snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", value->data.string_val);
 			conf->valid = true;
 			printf("\nVALID ifname = %s\n", conf->ifname);
@@ -495,7 +495,7 @@ printf("VID:%s\n", vid);
 	if (rc == SR_ERR_NOT_FOUND)
 		rc = SR_ERR_OK;
 
-	if (true) {
+	if (conf->valid) {
 		set_inet_vlan(conf->ifname, conf->vid, true);
 		printf("--------name:%s vid:%d\n", conf->ifname, conf->vid);
 	}
