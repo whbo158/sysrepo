@@ -278,7 +278,7 @@ static int set_inet_cfg(char *ifname, int req, void *buf, int len)
 	}
 
 	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
 
 	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
 	if (ret < 0) {
@@ -287,7 +287,7 @@ static int set_inet_cfg(char *ifname, int req, void *buf, int len)
 	}
 
 	if (req == SIOCSIFHWADDR) {
-		memcpy(&ifr.ifr_ifru.ifru_hwaddr.sa_data, buf, IFHWADDRLEN);
+		memcpy(&ifr.ifr_ifru.ifru_hwaddr.sa_data, buf, len);
 		ifr.ifr_addr.sa_family = ARPHRD_ETHER;
 	} else {
 		sin = (struct sockaddr_in *)&ifr.ifr_addr;
@@ -316,9 +316,9 @@ int set_inet_mask(char *ifname, struct in_addr *mask)
 	return set_inet_cfg(ifname, SIOCSIFNETMASK, mask, ADDR_LEN);
 }
 
-int set_inet_mac(char *ifname, uint8 *buf)
+int set_inet_mac(char *ifname, uint8 *buf, int len)
 {
-	return set_inet_cfg(ifname, SIOCSIFHWADDR, buf, IFHWADDRLEN);
+	return set_inet_cfg(ifname, SIOCSIFHWADDR, buf, len);
 }
 
 static int set_inet_updown(char *ifname, bool upflag)
@@ -339,7 +339,7 @@ static int set_inet_updown(char *ifname, bool upflag)
 	}
 
 	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", ifname);
 
 	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
 	if (ret < 0) {
@@ -503,14 +503,6 @@ printf("CUR COUNT:%d\n", count);
 	if (!valid)
 		goto cleanup;
 
-	if (conf->ip.s_addr) {
-		set_inet_ip(conf->ifname, &conf->ip);
-	}
-
-	if (conf->mask.s_addr) {
-		set_inet_mask(conf->ifname, &conf->mask);
-	}
-
 cleanup:
     sr_free_values(values, count);
 
@@ -530,6 +522,9 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char ifname_bak[IF_NAME_MAX_LEN] = {0,};
 	char xpath[XPATH_MAX_LEN] = {0};
 	char err_msg[MSG_MAX_LEN] = {0};
+	struct inet_cfg *conf = &sinet_conf;
+
+	memset(conf, 0, sizeof(struct inet_cfg));
 
 	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
 	rc = sr_get_changes_iter(session, xpath, &it);
@@ -573,6 +568,15 @@ printf("IFNAME:%s\n", ifname);
 	}
 	if (rc == SR_ERR_NOT_FOUND)
 		rc = SR_ERR_OK;
+
+	if (conf->ip.s_addr) {
+		set_inet_ip(conf->ifname, &conf->ip);
+	}
+
+	if (conf->mask.s_addr) {
+		set_inet_mask(conf->ifname, &conf->mask);
+	}
+
 cleanup:
 	return rc;
 }
@@ -625,7 +629,7 @@ main(int argc, char **argv)
     sr_session_ctx_t *session = NULL;
     sr_subscription_ctx_t *subscription = NULL;
     int rc = SR_ERR_OK;
-	char path[XPATH_MAX_LEN];
+    char path[XPATH_MAX_LEN];
     const char *mod_name, *xpath = NULL;
 #if 0
     if ((argc < 2) || (argc > 3)) {
@@ -639,7 +643,7 @@ main(int argc, char **argv)
 #else
     mod_name = "ietf-interfaces";
 	snprintf(path, XPATH_MAX_LEN, "%s", IF_XPATH);
-	strncat(path, "/ietf-ip:ipv4", XPATH_MAX_LEN);
+	strncat(path, "/ietf-ip:ipv4", XPATH_MAX_LEN - 1 - strlen(path));
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);

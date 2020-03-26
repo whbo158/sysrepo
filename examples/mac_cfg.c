@@ -514,7 +514,7 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char err_msg[MSG_MAX_LEN] = {0};
 	struct inet_cfg *conf = &sinet_conf;
 
-	memset(&sinet_conf, 0, sizeof(struct inet_cfg));
+	memset(conf, 0, sizeof(struct inet_cfg));
 
 	snprintf(xpath, XPATH_MAX_LEN, "%s//*", BRIDGE_XPATH);
 	rc = sr_get_changes_iter(session, xpath, &it);
@@ -632,7 +632,6 @@ main(int argc, char **argv)
 #else
     mod_name = "ieee802-dot1q-bridge";
 	snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_ADDRESS_XPATH);
-	//strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN);
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);

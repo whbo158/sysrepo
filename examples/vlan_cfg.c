@@ -562,7 +562,7 @@ main(int argc, char **argv)
 #else
     mod_name = "ieee802-dot1q-bridge";
 	snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_COMPONENT_XPATH);
-	strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN);
+	strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
