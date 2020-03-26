@@ -490,7 +490,7 @@ printf("IFNAME11:%s--%s len:%d\n", ifname, conf->ifname, strlen(ifname));
 		return rc;
 	}
 
-
+printf("CUR COUNT:%d\n", count);
 	for (i = 0; i < count; i++) {
 		if (values[i].type == SR_LIST_T
 		    || values[i].type == SR_CONTAINER_PRESENCE_T)
@@ -553,8 +553,8 @@ printf("XPATH:%s\n", xpath);
 					    "name", &xp_ctx);
 printf("IFNAME:%s\n", ifname);
 
-        sr_free_val(old_value);
-        sr_free_val(new_value);
+		sr_free_val(old_value);
+		sr_free_val(new_value);
 
 		if (!ifname)
 			continue;
