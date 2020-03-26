@@ -53,6 +53,7 @@
 #define IF_XPATH "/ietf-interfaces:interfaces/interface"
 #define BRIDGE_XPATH "/ieee802-dot1q-bridge:bridges/bridge"
 #define BRIDGE_COMPONENT_XPATH (BRIDGE_XPATH "/component")
+#define IPV4_XPATH ("/ietf-ip:ipv4")
 
 #define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
 #define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
@@ -643,7 +644,7 @@ main(int argc, char **argv)
 #else
     mod_name = "ietf-interfaces";
 	snprintf(path, XPATH_MAX_LEN, "%s", IF_XPATH);
-	strncat(path, "/ietf-ip:ipv4", XPATH_MAX_LEN - 1 - strlen(path));
+	strncat(path, IPV4_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);

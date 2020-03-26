@@ -281,10 +281,10 @@ int set_inet_vlan(char *ifname, int vid, bool addflag)
 
 	if (addflag) {
 		ifr.cmd = ADD_VLAN_CMD;
-		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s", ifname);
+		snprintf(ifr.device1, sizeof(ifr.device1), "%s", ifname);
 	} else {
 		ifr.cmd = DEL_VLAN_CMD;
-		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s.%d", ifname, vid);
+		snprintf(ifr.device1, sizeof(ifr.device1), "%s.%d", ifname, vid);
 	}
 
 	ret = ioctl(sockfd, SIOCSIFVLAN, &ifr);
@@ -561,9 +561,9 @@ main(int argc, char **argv)
     }
 #else
     mod_name = "ieee802-dot1q-bridge";
-	snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_COMPONENT_XPATH);
-	strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
-	xpath = path;
+    snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_COMPONENT_XPATH);
+    strncat(path, CB_BRVLAN_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
+    xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
 
