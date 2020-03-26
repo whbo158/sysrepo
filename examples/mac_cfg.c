@@ -68,6 +68,7 @@ typedef unsigned int uint32;
 struct inet_cfg
 {
 	int flag;
+	int valid;
 	uint32 vid;
 	char ifname[IF_NAME_MAX_LEN];
 	char mac_addr[MAC_ADDR_MAX_LEN];
@@ -262,13 +263,14 @@ cleanup:
     return SR_ERR_OK;
 }
 
-int set_inet_vlan(char *ifname, int vid, bool addflag)
+static int set_inet_cfg(char *ifname, int req, void *buf, int len)
 {
 	int ret = 0;
 	int sockfd = 0;
-	struct vlan_ioctl_args ifr;
+	struct ifreq ifr = {0};
+	struct sockaddr_in *sin = NULL;
 
-	if (!ifname)
+	if (!ifname || !buf)
 		return -1;
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -279,25 +281,47 @@ int set_inet_vlan(char *ifname, int vid, bool addflag)
 	}
 
 	memset(&ifr, 0, sizeof(ifr));
-	ifr.u.VID = vid;
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name) - 1, "%s", ifname);
 
-	if (addflag) {
-		ifr.cmd = ADD_VLAN_CMD;
-		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s", ifname);
-	} else {
-		ifr.cmd = DEL_VLAN_CMD;
-		snprintf(ifr.device1, sizeof(ifr.device1) - 1, "%s.%d", ifname, vid);
+	ret = ioctl(sockfd, SIOCGIFFLAGS, &ifr);
+	if (ret < 0) {
+		PRINT("get interface flag failed! ret:%d\n", ret);
+		return -3;
 	}
 
-	ret = ioctl(sockfd, SIOCSIFVLAN, &ifr);
+	if (req == SIOCSIFHWADDR) {
+		memcpy(&ifr.ifr_ifru.ifru_hwaddr.sa_data, buf, IFHWADDRLEN);
+		ifr.ifr_addr.sa_family = ARPHRD_ETHER;
+	} else {
+		sin = (struct sockaddr_in *)&ifr.ifr_addr;
+		sin->sin_family = AF_INET;
+		memcpy(&sin->sin_addr, (struct in_addr *)buf, len);
+	}
+
+	ret = ioctl(sockfd, req, &ifr);
 	close(sockfd);
 	if (ret < 0) {
 		PRINT("ioctl error! ret:%d, need root account!\n", ret);
 		PRINT("Note: this operation needs root permission!\n");
-		return -3;
+		return -4;
 	}
 
 	return 0;
+}
+
+int set_inet_ip(char *ifname, struct in_addr *ip)
+{
+	return set_inet_cfg(ifname, SIOCSIFADDR, ip, ADDR_LEN);
+}
+
+int set_inet_mask(char *ifname, struct in_addr *mask)
+{
+	return set_inet_cfg(ifname, SIOCSIFNETMASK, mask, ADDR_LEN);
+}
+
+int set_inet_mac(char *ifname, uint8 *buf, int len)
+{
+	return set_inet_cfg(ifname, SIOCSIFHWADDR, buf, len);
 }
 
 bool is_valid_addr(uint8 *ip)
@@ -313,6 +337,44 @@ bool is_valid_addr(uint8 *ip)
 		return false;
 
 	return true;
+}
+
+int convert_mac_address(char *str, uint8 *pbuf, int buflen)
+{
+	int i = 0;
+	int ret = 0;
+	int len = 0;
+	int cnt = 0;
+	uint32 data = 0;
+	char *pmac = NULL;
+	char buf[32] = {0};
+
+	if (!str || !pbuf)
+		return -1;
+
+	snprintf(buf, sizeof(buf), "%s", str);
+	pmac = buf;
+
+	len = strlen(buf);
+	for (i = 0; i < (len + 1); i++) {
+		if ((buf[i] == '-') || (buf[i] == ':') || (buf[i] == '\0')) {
+			buf[i] = '\0';
+			ret = sscanf(pmac, "%02X", &data);
+			if (ret != 1)
+			      return -2;
+
+			if (cnt < buflen)
+			      pbuf[cnt++] = data & 0xFF;
+
+			pmac = buf + i + 1;
+		}
+	}
+#if 1
+	for (i = 0; i < cnt; i++) {
+		printf("%d:%X\n", i, pbuf[i]);
+	}
+#endif
+	return 0;
 }
 
 static bool is_del_oper(sr_session_ctx_t *session, char *path)
@@ -367,13 +429,13 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value, struct inet_cfg *conf
 printf("WHB nodename:%s type:%d\n", nodename, value->type);
 
 	if (!strcmp(nodename, "address")) {
-		if (!conf->flag) {
+		if (!conf->valid) {
 			snprintf(conf->mac_addr, MAC_ADDR_MAX_LEN, "%s", value->data.string_val);
 			printf("\nVALID ip= %d\n", conf->vid);
-			conf->flag = 1;
+			conf->valid = 1;
 		}
 	} else if (!strcmp(nodename, "name")) {
-		if (!conf->flag) {
+		if (!conf->valid) {
 			snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", value->data.string_val);
 			printf("\nVALID mac = %s\n", conf->ifname);
 		}
@@ -432,11 +494,6 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	if (!valid)
 		goto cleanup;
 
-	if (conf->flag) {
-		//set_inet_vlan(conf->ifname, conf->vid, true);
-		printf("--------name:%s mac:%s\n", conf->ifname, conf->mac_addr);
-	}
-
 cleanup:
     sr_free_values(values, count);
 
@@ -455,6 +512,7 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char *vid;
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
+	struct inet_cfg *conf = &sinet_conf;
 
 	memset(&sinet_conf, 0, sizeof(struct inet_cfg));
 
@@ -499,6 +557,15 @@ printf("IFNAME:%s\n", vid);
 	}
 	if (rc == SR_ERR_NOT_FOUND)
 		rc = SR_ERR_OK;
+
+	if (conf->valid) {
+		uint8 mac[IFHWADDRLEN];
+
+		printf("--------name:%s mac:%s\n", conf->ifname, conf->mac_addr);
+		convert_mac_address(conf->mac_addr, mac, sizeof(mac));
+		set_inet_mac(conf->ifname, mac, sizeof(mac));
+	}
+
 cleanup:
 	return rc;
 }
