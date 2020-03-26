@@ -66,9 +66,10 @@ typedef unsigned char uint8;
 typedef unsigned int uint32;
 struct inet_cfg
 {
-	int flag;
 	uint32 vid;
 	char ifname[IF_NAME_MAX_LEN];
+	bool vidflag;
+	bool valid;
 };
 
 static struct inet_cfg sinet_conf;
@@ -362,17 +363,19 @@ int parse_inet(sr_session_ctx_t *session, sr_val_t *value, struct inet_cfg *conf
 	nodename = sr_xpath_node_name(value->xpath);
 	if (!nodename)
 		goto out;
-//printf("WHB nodename:%s type:%d\n", nodename, value->type);
+printf("WHB nodename:%s type:%d\n", nodename, value->type);
 
 	if (!strcmp(nodename, "vid")) {
 		if (true) {
 			conf->vid = value->data.uint32_val;
-		//	printf("\nVALID ip= %d\n", conf->vid);
+			conf->vidflag = true;
+			printf("\nVALID vid= %d\n", conf->vid);
 		}
 	} else if (!strcmp(nodename, "name")) {
 		if (true) {
 			snprintf(conf->ifname, IF_NAME_MAX_LEN, "%s", value->data.string_val);
-			//printf("\nVALID netmask = %s\n", conf->ifname);
+			conf->valid = true;
+			printf("\nVALID ifname = %s\n", conf->ifname);
 		}
 	}
 
@@ -429,12 +432,6 @@ static int config_inet_per_port(sr_session_ctx_t *session, char *path, bool abor
 	if (!valid)
 		goto cleanup;
 
-	if (conf->flag == 0) {
-		conf->flag = 1;
-		set_inet_vlan(conf->ifname, conf->vid, true);
-		printf("--------name:%s vid:%d\n", conf->ifname, conf->vid);
-	}
-
 cleanup:
     sr_free_values(values, count);
 
@@ -453,8 +450,9 @@ int inet_config(sr_session_ctx_t *session, const char *path, bool abort)
 	char *vid;
 	char xpath[XPATH_MAX_LEN] = {0,};
 	char err_msg[MSG_MAX_LEN] = {0};
+	struct inet_cfg *conf = &sinet_conf;
 
-	memset(&sinet_conf, 0, sizeof(struct inet_cfg));
+	memset(conf, 0, sizeof(struct inet_cfg));
 
 	snprintf(xpath, XPATH_MAX_LEN, "%s//*", path);
 	rc = sr_get_changes_iter(session, xpath, &it);
@@ -476,10 +474,10 @@ printf("XPATH:%s\n", xpath);
 		value = new_value ? new_value : old_value;
 		vid = sr_xpath_key_value(value->xpath, "vlan",
 					    "vid", &xp_ctx);
-printf("IFNAME:%s\n", vid);
+printf("VID:%s\n", vid);
 
-        sr_free_val(old_value);
-        sr_free_val(new_value);
+		sr_free_val(old_value);
+		sr_free_val(new_value);
 
 		if (!vid)
 			continue;
@@ -496,6 +494,12 @@ printf("IFNAME:%s\n", vid);
 	}
 	if (rc == SR_ERR_NOT_FOUND)
 		rc = SR_ERR_OK;
+
+	if (true) {
+		set_inet_vlan(conf->ifname, conf->vid, true);
+		printf("--------name:%s vid:%d\n", conf->ifname, conf->vid);
+	}
+
 cleanup:
 	return rc;
 }
