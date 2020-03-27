@@ -69,7 +69,7 @@ struct inet_cfg
 {
 	struct in_addr ip;
 	struct in_addr mask;
-	char ifname[IF_NAME_MAX_LEN + 1];
+	char ifname[IF_NAME_MAX_LEN];
 };
 
 static struct inet_cfg sinet_conf;
