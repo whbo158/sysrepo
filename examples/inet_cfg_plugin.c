@@ -54,6 +54,7 @@
 #define BRIDGE_XPATH "/ieee802-dot1q-bridge:bridges/bridge"
 #define BRIDGE_COMPONENT_XPATH (BRIDGE_XPATH "/component")
 #define IPV4_XPATH ("/ietf-ip:ipv4")
+#define BRTC_XPATH "/nxp-bridge-vlan-tc-flower:traffic-control"
 
 #define QBV_GATE_PARA_XPATH "/ieee802-dot1q-sched:gate-parameters"
 #define QBV_MAX_SDU_XPATH "/ieee802-dot1q-sched:max-sdu-table"
@@ -642,9 +643,12 @@ main(int argc, char **argv)
         xpath = argv[2];
     }
 #else
-    mod_name = "ietf-interfaces";
-	snprintf(path, XPATH_MAX_LEN, "%s", IF_XPATH);
-	strncat(path, IPV4_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
+    mod_name = "ieee802-dot1q-bridge";
+	snprintf(path, XPATH_MAX_LEN, "%s", BRIDGE_COMPONENT_XPATH);
+	strncat(path, BRTC_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
+    //mod_name = "ietf-interfaces";
+	//snprintf(path, XPATH_MAX_LEN, "%s", IF_XPATH);
+	//strncat(path, IPV4_XPATH, XPATH_MAX_LEN - 1 - strlen(path));
 	xpath = path;
 #endif
     printf("Application will watch for changes in \"%s\".\n", xpath ? xpath : mod_name);
@@ -669,8 +673,8 @@ main(int argc, char **argv)
     print_current_config(session, mod_name);
 
     /* subscribe for changes in running config */
-    //rc = sr_module_change_subscribe(session, mod_name, xpath, module_change_cb, NULL, 0, 0, &subscription);
-    rc = sr_module_change_subscribe(session, mod_name, xpath, inet_subtree_change_cb, NULL, 0, 0, &subscription);
+    rc = sr_module_change_subscribe(session, mod_name, xpath, module_change_cb, NULL, 0, 0, &subscription);
+    //rc = sr_module_change_subscribe(session, mod_name, xpath, inet_subtree_change_cb, NULL, 0, 0, &subscription);
     if (rc != SR_ERR_OK) {
         goto cleanup;
     }
